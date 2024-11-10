@@ -11,12 +11,13 @@ pub struct ProxyConfig {
     pub max_connections: usize,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
 pub struct RouteConfig {
     pub upstream: String,
-    pub health_check_path: Option<String>,
     pub timeout_ms: Option<u64>,
     pub retry_count: Option<u32>,
+    #[serde(default)]  // This makes priority optional with a default of 0
+    pub priority: Option<i32>,
 }
 
 pub fn load_config(path: &str) -> Result<ProxyConfig> {

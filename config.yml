@@ -1,21 +1,20 @@
-listen_addr: "0.0.0.0:8080"
+listen_addr: "0.0.0.0:8081"
 global_timeout_ms: 5000
 max_connections: 10000
 
 routes:
+  "/api/critical":
+    upstream: "http://critical-backend:8080"
+    priority: 100
+    timeout_ms: 1000
+    retry_count: 3
   "/api":
-    upstream: "http://backend-api:8080"
-    health_check_path: "/health"
+    upstream: "http://localhost:8080/docs"
+    priority: 50
     timeout_ms: 3000
     retry_count: 2
-  
   "/":
-    upstream: "http://192.168.1.179:4173"
-    timeout_ms: 1000
+    upstream: "http://localhost:8080/"
+    priority: 0
+    timeout_ms: 5000
     retry_count: 1
-    preserve_host_header: true  # For SvelteKit routing
-
-  "/static":
-    upstream: "http://default-backend:8080"
-    timeout_ms: 2000
-    retry_count: 2
