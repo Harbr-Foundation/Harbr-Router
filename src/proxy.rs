@@ -2,13 +2,13 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 use hyper::{Body, Request, Response, Server, Uri};
 use hyper::service::{make_service_fn, service_fn};
+use hyper::header::{HeaderName, HeaderValue, HOST};
 use metrics::{counter, histogram};
 use std::time::Instant;
 use dashmap::DashMap;
 use std::convert::Infallible;
 use crate::config;
 use std::str::FromStr;
-use hyper::header::{HeaderValue, HOST};
 
 type SharedConfig = Arc<RwLock<config::ProxyConfig>>;
 type BackendCache = Arc<DashMap<String, hyper::Client<hyper::client::HttpConnector>>>;
@@ -28,9 +28,7 @@ pub async fn run_server(config: SharedConfig) -> Result<(), Box<dyn std::error::
         }
     });
 
-    let server = Server::bind(&addr)
-        .serve(make_svc);
-
+    let server = Server::bind(&addr).serve(make_svc);
     let graceful = server.with_graceful_shutdown(shutdown_signal());
 
     tracing::info!("Reverse proxy listening on {}", addr);
@@ -38,23 +36,20 @@ pub async fn run_server(config: SharedConfig) -> Result<(), Box<dyn std::error::
     Ok(())
 }
 
-// Helper function to create a request
-fn create_proxied_request(
-    original_req: &Request<Body>,
-    uri: &Uri,
-) -> Result<Request<Body>, Box<dyn std::error::Error + Send + Sync>> {
-    let mut builder = Request::builder()
-        .method(original_req.method())
-        .uri(uri)
-        .version(original_req.version());
+// Helper function to find best matching route
+fn find_matching_route(
+    path: &str,
+    routes: &std::collections::HashMap<String, config::RouteConfig>
+) -> Option<(String, config::RouteConfig)> {
+    let mut route_paths: Vec<_> = routes.iter().collect();
+    route_paths.sort_by(|a, b| b.0.len().cmp(&a.0.len()));
     
-    // Copy headers
-    let headers = builder.headers_mut().unwrap();
-    for (key, value) in original_req.headers() {
-        headers.insert(key, value.clone());
+    for (route_path, route_config) in route_paths {
+        if path.starts_with(route_path) {
+            return Some((route_path.clone(), route_config.clone()));
+        }
     }
-    
-    Ok(builder.body(Body::empty())?)
+    None
 }
 
 async fn handle_request(
@@ -63,16 +58,14 @@ async fn handle_request(
     backend_cache: BackendCache,
 ) -> Result<Response<Body>, Box<dyn std::error::Error + Send + Sync>> {
     let start = Instant::now();
-    let path = req.uri().path();
+    let path = req.uri().path().to_string();
     
-    println!("Processing a request!");
+    tracing::debug!("Processing request for path: {}", path);
 
-    // Get route configuration
-    let route = {
+    // Get route configuration with priority matching
+    let (route_path, route) = {
         let config = config.read().await;
-        config.routes.get(path)
-            .or_else(|| config.routes.get("/"))
-            .cloned()
+        find_matching_route(&path, &config.routes)
             .ok_or_else(|| std::io::Error::new(
                 std::io::ErrorKind::NotFound,
                 format!("No route found for path: {}", path)
@@ -96,49 +89,101 @@ async fn handle_request(
     let upstream_uri = Uri::from_str(&route.upstream)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?;
     
-    // Construct the new URI for the upstream request
-    let upstream_authority = upstream_uri.authority().expect("upstream URI must have authority").clone();
-    let upstream_scheme = upstream_uri.scheme_str().unwrap_or("http");
-    
-    // Keep the original path and query
-    let path_and_query = req.uri().path_and_query()
-        .map(|p| p.as_str())
-        .unwrap_or("/");
-    
-    let new_uri = format!("{}://{}{}", upstream_scheme, upstream_authority, path_and_query)
-        .parse::<Uri>()
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?;
+    // Build the new request
+    let (parts, body) = req.into_parts();
+    let new_path = if route.strip_path_prefix {
+        if path.starts_with(&route_path) {
+            let stripped = &path[route_path.len()..];
+            if stripped.is_empty() { "/" } else { stripped }
+        } else {
+            &path
+        }
+    } else {
+        &path
+    };
 
-    // Send request with timeout and retry logic
+    // Clone method and create URI once
+    let method = parts.method.clone();
+    let version = parts.version;
+    let new_uri = if let Some(query) = parts.uri.query() {
+        format!("{}{}?{}", upstream_uri, new_path, query)
+    } else {
+        format!("{}{}", upstream_uri, new_path)
+    }.parse::<Uri>()?;
+
+    // Store headers in a way that can be reused
+    let headers_vec: Vec<(HeaderName, HeaderValue)> = parts.headers
+        .iter()
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect();
+
+    let host_header = if !route.preserve_host_header.unwrap_or(false) {
+        Some(HeaderValue::from_str(
+            upstream_uri.authority()
+                .expect("upstream URI must have authority")
+                .as_str()
+        ).ok())
+    } else {
+        None
+    };
+
+    // Aggregate the body into bytes for potential retries
+    let body_bytes = hyper::body::to_bytes(body).await?;
+    
+    // Create a function to build the request
+    let build_request = |body: hyper::body::Bytes| -> Result<Request<Body>, Box<dyn std::error::Error + Send + Sync>> {
+        let mut builder = Request::builder()
+            .method(method.clone())
+            .uri(new_uri.clone())
+            .version(version);
+
+        let headers = builder.headers_mut().unwrap();
+        for (key, value) in &headers_vec {
+            headers.insert(key, value.clone());
+        }
+
+        if let Some(Some(host)) = &host_header {
+            headers.insert(HOST, host.clone());
+        }
+
+        Ok(builder.body(Body::from(body))?)
+    };
+
     let timeout = route.timeout_ms.unwrap_or(3000);
     let retry_count = route.retry_count.unwrap_or(2);
     
-    let mut response = None;
+    let mut final_response = None;
+    
+    // Try the request with retries
     for attempt in 0..=retry_count {
-        // Create a new request for each attempt
-        let mut proxied_req = create_proxied_request(&req, &new_uri)?;
+        let request = build_request(body_bytes.clone())?;
         
-        // Update host header
-        if let Ok(host) = HeaderValue::from_str(upstream_authority.as_str()) {
-            proxied_req.headers_mut().insert(HOST, host);
-        }
-
         match tokio::time::timeout(
             std::time::Duration::from_millis(timeout),
-            client.request(proxied_req)
+            client.request(request)
         ).await {
             Ok(Ok(resp)) => {
-                response = Some(resp);
+                final_response = Some(resp);
                 counter!("proxy.attempt.success", 1);
                 break;
             }
             Ok(Err(e)) => {
                 tracing::warn!("Request failed (attempt {}): {}", attempt + 1, e);
                 counter!("proxy.attempt.failure", 1);
+                
+                // Add a small delay between retries
+                if attempt < retry_count {
+                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                }
             }
             Err(_) => {
                 tracing::warn!("Request timed out (attempt {})", attempt + 1);
                 counter!("proxy.attempt.timeout", 1);
+                
+                // Add a small delay between retries
+                if attempt < retry_count {
+                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                }
             }
         }
     }
@@ -147,7 +192,7 @@ async fn handle_request(
     let duration = start.elapsed();
     histogram!("proxy.request.duration", duration.as_secs_f64());
 
-    match response {
+    match final_response {
         Some(resp) => {
             counter!("proxy.request.success", 1);
             Ok(resp)
@@ -166,4 +211,43 @@ async fn shutdown_signal() {
     tokio::signal::ctrl_c()
         .await
         .expect("Failed to install CTRL+C signal handler");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use hyper::{StatusCode, Method};
+    use std::collections::HashMap;
+    
+    #[tokio::test]
+    async fn test_find_matching_route() {
+        let mut routes = HashMap::new();
+        routes.insert("/api/v1".to_string(), config::RouteConfig {
+            upstream: "http://backend1".to_string(),
+            strip_path_prefix: true,
+            preserve_host_header: Some(false),
+            timeout_ms: Some(1000),
+            retry_count: Some(1),
+        });
+        routes.insert("/api".to_string(), config::RouteConfig {
+            upstream: "http://backend2".to_string(),
+            strip_path_prefix: false,
+            preserve_host_header: Some(true),
+            timeout_ms: None,
+            retry_count: None,
+        });
+
+        // Test exact match
+        let (path, route) = find_matching_route("/api/v1", &routes).unwrap();
+        assert_eq!(path, "/api/v1");
+        assert_eq!(route.upstream, "http://backend1");
+
+        // Test partial match
+        let (path, route) = find_matching_route("/api/other", &routes).unwrap();
+        assert_eq!(path, "/api");
+        assert_eq!(route.upstream, "http://backend2");
+
+        // Test no match
+        assert!(find_matching_route("/other", &routes).is_none());
+    }
 }
