@@ -6,7 +6,7 @@ RUN USER=root cargo new harbr-router
 WORKDIR /usr/src/harbr-router/harbr-router
 
 # Copy manifests
-COPY Cargo.toml Cargo.lock ./
+COPY Cargo.toml ./
 
 # Copy source code
 COPY src src/
