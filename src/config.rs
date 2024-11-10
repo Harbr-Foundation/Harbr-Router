@@ -18,6 +18,8 @@ pub struct RouteConfig {
     pub retry_count: Option<u32>,
     #[serde(default)]  // This makes priority optional with a default of 0
     pub priority: Option<i32>,
+    pub preserve_host_header: Option<bool>,
+    
 }
 
 pub fn load_config(path: &str) -> Result<ProxyConfig> {

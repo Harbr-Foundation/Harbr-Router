@@ -142,17 +142,17 @@ async fn handle_request(
 
         matching_routes.into_iter()
             .next()
-            .map(|(_, route, _, _)| route)
             .ok_or_else(|| {
                 let err = format!("No route found for path: {}", normalized_path);
                 tracing::error!("{}", err);
                 warp::reject::custom(RouteNotFound)
-            })?
+            })
+            .map(|(route_path, route_config, _, _)| (route_path, route_config))?
     };
 
     // Get or create backend client
     let client = backend_cache
-        .entry(route.upstream.clone())
+        .entry(route.1.upstream.clone())
         .or_insert_with(|| {
             Client::builder()
                 .timeout(std::time::Duration::from_secs(30))
@@ -163,7 +163,7 @@ async fn handle_request(
         .clone();
 
     // Parse upstream URI
-    let upstream_uri = reqwest::Url::from_str(&route.upstream)
+    let upstream_uri = reqwest::Url::from_str(&route.1.upstream)
         .map_err(|_| warp::reject::custom(InvalidUpstreamUrl))?;
     
     // Build the final URL
@@ -171,7 +171,13 @@ async fn handle_request(
     
     // Handle path joining properly
     let upstream_path = upstream_uri.path().trim_end_matches('/');
-    let request_path = path_str.trim_start_matches('/');
+    
+    // Strip the matching route prefix from the request path
+    let request_path = if route.0 == "/" {
+        path_str
+    } else {
+        &path_str[route.0.len()..]
+    }.trim_start_matches('/');
     
     // If upstream path is not empty and not just "/", combine it with request path
     let final_path = if upstream_path.is_empty() || upstream_path == "/" {
@@ -193,8 +199,8 @@ async fn handle_request(
     tracing::info!("Forwarding to upstream URL: {}", final_url);
 
     // Send request with timeout and retry logic
-    let timeout = route.timeout_ms.unwrap_or(3000);
-    let retry_count = route.retry_count.unwrap_or(2);
+    let timeout = route.1.timeout_ms.unwrap_or(3000);
+    let retry_count = route.1.retry_count.unwrap_or(2);
     
     let mut response = None;
     for attempt in 0..=retry_count {
@@ -204,10 +210,13 @@ async fn handle_request(
             .headers(convert_headers(&headers))
             .body(body.clone());
 
-        // Set host header to upstream host
-        if let Some(host) = final_url.host_str() {
-            if let Ok(host_value) = reqwest::header::HeaderValue::from_str(host) {
-                req_builder = req_builder.header(reqwest::header::HOST, host_value);
+        // Handle Host header based on preserve_host_header setting
+        if !route.1.preserve_host_header.unwrap_or(false) {
+            // Only set the host header to upstream host if we're not preserving the original
+            if let Some(host) = final_url.host_str() {
+                if let Ok(host_value) = reqwest::header::HeaderValue::from_str(host) {
+                    req_builder = req_builder.header(reqwest::header::HOST, host_value);
+                }
             }
         }
 
@@ -227,7 +236,7 @@ async fn handle_request(
     // Record metrics
     let duration = start.elapsed();
     histogram!("proxy.request.duration", duration.as_secs_f64());
-    counter!("proxy.request.priority", route.priority.unwrap_or(0) as u64);
+    counter!("proxy.request.priority", route.1.priority.unwrap_or(0) as u64);
 
     match response {
         Some(resp) => {
