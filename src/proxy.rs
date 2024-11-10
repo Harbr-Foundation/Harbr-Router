@@ -65,6 +65,8 @@ async fn handle_request(
     let start = Instant::now();
     let path = req.uri().path();
     
+    println!("Processing a request!");
+
     // Get route configuration
     let route = {
         let config = config.read().await;
