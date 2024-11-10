@@ -9,12 +9,13 @@ routes:
     timeout_ms: 3000
     retry_count: 2
   
-  "/static":
-    upstream: "http://static-server:80"
+  "/":
+    upstream: "http://192.168.1.179:4173"
     timeout_ms: 1000
     retry_count: 1
-  
-  "/":
+    preserve_host_header: true  # For SvelteKit routing
+
+  "/static":
     upstream: "http://default-backend:8080"
     timeout_ms: 2000
     retry_count: 2

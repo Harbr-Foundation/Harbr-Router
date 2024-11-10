@@ -8,6 +8,7 @@ use dashmap::DashMap;
 use std::convert::Infallible;
 use crate::config;
 use std::str::FromStr;
+use hyper::header::{HeaderValue, HOST};
 
 type SharedConfig = Arc<RwLock<config::ProxyConfig>>;
 type BackendCache = Arc<DashMap<String, hyper::Client<hyper::client::HttpConnector>>>;
@@ -16,7 +17,6 @@ pub async fn run_server(config: SharedConfig) -> Result<(), Box<dyn std::error::
     let addr = config.read().await.listen_addr.parse()?;
     let backend_cache: BackendCache = Arc::new(DashMap::new());
 
-    // Create service
     let make_svc = make_service_fn(move |_| {
         let config = config.clone();
         let cache = backend_cache.clone();
@@ -28,7 +28,6 @@ pub async fn run_server(config: SharedConfig) -> Result<(), Box<dyn std::error::
         }
     });
 
-    // Build and run server
     let server = Server::bind(&addr)
         .serve(make_svc);
 
@@ -37,6 +36,25 @@ pub async fn run_server(config: SharedConfig) -> Result<(), Box<dyn std::error::
     tracing::info!("Reverse proxy listening on {}", addr);
     graceful.await?;
     Ok(())
+}
+
+// Helper function to create a request
+fn create_proxied_request(
+    original_req: &Request<Body>,
+    uri: &Uri,
+) -> Result<Request<Body>, Box<dyn std::error::Error + Send + Sync>> {
+    let mut builder = Request::builder()
+        .method(original_req.method())
+        .uri(uri)
+        .version(original_req.version());
+    
+    // Copy headers
+    let headers = builder.headers_mut().unwrap();
+    for (key, value) in original_req.headers() {
+        headers.insert(key, value.clone());
+    }
+    
+    Ok(builder.body(Body::empty())?)
 }
 
 async fn handle_request(
@@ -62,7 +80,13 @@ async fn handle_request(
     // Get or create backend client
     let client = backend_cache
         .entry(route.upstream.clone())
-        .or_insert_with(|| hyper::Client::new())
+        .or_insert_with(|| {
+            let mut connector = hyper::client::HttpConnector::new();
+            connector.set_nodelay(true);
+            hyper::Client::builder()
+                .pool_idle_timeout(std::time::Duration::from_secs(30))
+                .build(connector)
+        })
         .value()
         .clone();
 
@@ -70,20 +94,18 @@ async fn handle_request(
     let upstream_uri = Uri::from_str(&route.upstream)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?;
     
-    // Create new request for each attempt since we can't clone the original
-    let create_upstream_request = || -> Result<Request<Body>, Box<dyn std::error::Error + Send + Sync>> {
-        let mut builder = Request::builder()
-            .method(req.method())
-            .uri(&upstream_uri)
-            .version(req.version());
-        
-        // Copy headers
-        for (key, value) in req.headers() {
-            builder = builder.header(key, value);
-        }
-        
-        Ok(builder.body(Body::empty())?)
-    };
+    // Construct the new URI for the upstream request
+    let upstream_authority = upstream_uri.authority().expect("upstream URI must have authority").clone();
+    let upstream_scheme = upstream_uri.scheme_str().unwrap_or("http");
+    
+    // Keep the original path and query
+    let path_and_query = req.uri().path_and_query()
+        .map(|p| p.as_str())
+        .unwrap_or("/");
+    
+    let new_uri = format!("{}://{}{}", upstream_scheme, upstream_authority, path_and_query)
+        .parse::<Uri>()
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?;
 
     // Send request with timeout and retry logic
     let timeout = route.timeout_ms.unwrap_or(3000);
@@ -91,11 +113,17 @@ async fn handle_request(
     
     let mut response = None;
     for attempt in 0..=retry_count {
-        let upstream_req = create_upstream_request()?;
+        // Create a new request for each attempt
+        let mut proxied_req = create_proxied_request(&req, &new_uri)?;
         
+        // Update host header
+        if let Ok(host) = HeaderValue::from_str(upstream_authority.as_str()) {
+            proxied_req.headers_mut().insert(HOST, host);
+        }
+
         match tokio::time::timeout(
             std::time::Duration::from_millis(timeout),
-            client.request(upstream_req)
+            client.request(proxied_req)
         ).await {
             Ok(Ok(resp)) => {
                 response = Some(resp);
