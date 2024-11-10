@@ -14,10 +14,9 @@ pub struct ProxyConfig {
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct RouteConfig {
     pub upstream: String,
+    pub health_check_path: Option<String>,
     pub timeout_ms: Option<u64>,
     pub retry_count: Option<u32>,
-    pub preserve_host_header: Option<bool>,
-    pub strip_path_prefix: bool,  // Add this field
 }
 
 pub fn load_config(path: &str) -> Result<ProxyConfig> {
