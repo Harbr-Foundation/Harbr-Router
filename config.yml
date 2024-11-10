@@ -1,0 +1,20 @@
+listen_addr: "0.0.0.0:8080"
+global_timeout_ms: 5000
+max_connections: 10000
+
+routes:
+  "/api":
+    upstream: "http://backend-api:8080"
+    health_check_path: "/health"
+    timeout_ms: 3000
+    retry_count: 2
+  
+  "/static":
+    upstream: "http://static-server:80"
+    timeout_ms: 1000
+    retry_count: 1
+  
+  "/":
+    upstream: "http://default-backend:8080"
+    timeout_ms: 2000
+    retry_count: 2

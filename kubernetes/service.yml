@@ -1,0 +1,20 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: harbr-router
+  namespace: harbr-router
+  labels:
+    app: harbr-router
+  annotations:
+    prometheus.io/scrape: "true"
+    prometheus.io/port: "8080"
+    prometheus.io/path: "/metrics"
+spec:
+  type: ClusterIP
+  ports:
+    - port: 8080
+      targetPort: 8080
+      protocol: TCP
+      name: http
+  selector:
+    app: harbr-router

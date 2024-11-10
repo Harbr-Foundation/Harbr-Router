@@ -1,0 +1,18 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: harbr-router
+
+resources:
+  - ../kubernetes/namespace.yml
+  - ../kubernetes/configmap.yml
+  - ../kubernetes/service.yml
+  - ../kubernetes/deployment.yml
+  - ../kubernetes/hpa.yml
+  - ../kubernetes/servicemonitor.yml
+  - ../kubernetes/ingress.yml
+  - ../kubernetes/networkpolicy.yml
+
+commonLabels:
+  app: harbr-router
+  environment: base

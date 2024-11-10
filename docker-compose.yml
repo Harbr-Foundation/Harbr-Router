@@ -1,0 +1,36 @@
+version: '3.8'
+
+services:
+  proxy:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: harbr-router:latest
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./config.yml:/etc/harbr-router/config.yml:ro
+    environment:
+      - RUST_LOG=info
+      - RUST_MIN_THREADS=4
+      - RUST_MAX_THREADS=32
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/metrics"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 5s
+    restart: unless-stopped
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    deploy:
+      resources:
+        limits:
+          cpus: '4'
+          memory: 2G
+        reservations:
+          cpus: '2'
+          memory: 1G

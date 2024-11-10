@@ -1,0 +1,16 @@
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: harbr-router
+  namespace: harbr-router
+  labels:
+    app: harbr-router
+spec:
+  selector:
+    matchLabels:
+      app: harbr-router
+  endpoints:
+    - port: http
+      path: /metrics
+      interval: 15s
+      scrapeTimeout: 14s
