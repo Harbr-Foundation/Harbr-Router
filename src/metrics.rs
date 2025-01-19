@@ -1,5 +1,5 @@
-use metrics_exporter_prometheus::PrometheusBuilder;
 use anyhow::Result;
+use metrics_exporter_prometheus::PrometheusBuilder;
 
 pub fn init_metrics() -> Result<()> {
     let builder = PrometheusBuilder::new();

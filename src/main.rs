@@ -1,10 +1,10 @@
+use anyhow::Result;
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use anyhow::Result;
 
 mod config;
-mod proxy;
 mod metrics;
+mod proxy;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -21,7 +21,9 @@ async fn main() -> Result<()> {
     metrics::init_metrics()?;
 
     // Start the proxy server
-    proxy::run_server(config).await.map_err(|e| anyhow::anyhow!("Server error: {}", e))?;
+    proxy::run_server(config)
+        .await
+        .map_err(|e| anyhow::anyhow!("Server error: {}", e))?;
 
     Ok(())
 }
