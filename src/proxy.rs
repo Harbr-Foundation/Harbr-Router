@@ -1,20 +1,22 @@
-use std::sync::Arc;
-use tokio::sync::RwLock;
-use warp::{Filter, Reply, Rejection, path::FullPath};
-use metrics::{counter, histogram};
-use std::time::Instant;
-use dashmap::DashMap;
-use std::convert::Infallible;
-use reqwest::Client;
 use crate::config;
-use std::str::FromStr;
-use warp::http::header::HeaderMap;
+use dashmap::DashMap;
+use metrics::{counter, histogram};
+use reqwest::Client;
+use std::convert::Infallible;
 use std::net::SocketAddr;
+use std::str::FromStr;
+use std::sync::Arc;
+use std::time::Instant;
+use tokio::sync::RwLock;
+use warp::http::header::HeaderMap;
+use warp::{path::FullPath, Filter, Rejection, Reply};
 
 type SharedConfig = Arc<RwLock<config::ProxyConfig>>;
 type BackendCache = Arc<DashMap<String, Client>>;
 
-pub async fn run_server(config: SharedConfig) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+pub async fn run_server(
+    config: SharedConfig,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // Parse the socket address
     let addr = SocketAddr::from_str(&config.read().await.listen_addr)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?;
@@ -26,17 +28,20 @@ pub async fn run_server(config: SharedConfig) -> Result<(), Box<dyn std::error::
         .and(warp::path::full())
         .and(warp::method())
         .and(warp::header::headers_cloned())
-        .and(warp::filters::query::raw().or(warp::any().map(String::new)).unify())
+        .and(
+            warp::filters::query::raw()
+                .or(warp::any().map(String::new))
+                .unify(),
+        )
         .and(warp::body::bytes())
         .and(with_config(config.clone()))
         .and(with_cache(backend_cache.clone()))
         .and_then(handle_request);
 
     // Start the server with graceful shutdown
-    let (_, server) = warp::serve(routes)
-        .bind_with_graceful_shutdown(addr, async {
-            shutdown_signal().await;
-        });
+    let (_, server) = warp::serve(routes).bind_with_graceful_shutdown(addr, async {
+        shutdown_signal().await;
+    });
 
     tracing::info!("Reverse proxy listening on {}", addr);
     server.await;
@@ -67,15 +72,17 @@ fn convert_method(method: warp::http::Method) -> reqwest::Method {
         "CONNECT" => reqwest::Method::CONNECT,
         "PATCH" => reqwest::Method::PATCH,
         "TRACE" => reqwest::Method::TRACE,
-        _ => reqwest::Method::from_bytes(method.as_str().as_bytes())
-            .unwrap_or(reqwest::Method::GET)
+        _ => {
+            reqwest::Method::from_bytes(method.as_str().as_bytes()).unwrap_or(reqwest::Method::GET)
+        }
     }
 }
 
 fn convert_headers(headers: &HeaderMap) -> reqwest::header::HeaderMap {
     let mut reqwest_headers = reqwest::header::HeaderMap::new();
     for (name, value) in headers.iter() {
-        if let Ok(reqwest_name) = reqwest::header::HeaderName::from_bytes(name.as_str().as_bytes()) {
+        if let Ok(reqwest_name) = reqwest::header::HeaderName::from_bytes(name.as_str().as_bytes())
+        {
             if let Ok(reqwest_value) = reqwest::header::HeaderValue::from_bytes(value.as_bytes()) {
                 reqwest_headers.insert(reqwest_name, reqwest_value);
             }
@@ -95,27 +102,29 @@ async fn handle_request(
 ) -> Result<impl Reply, Rejection> {
     let start = Instant::now();
     let path_str = path.as_str();
-    
+
     tracing::info!("Processing request for path: {}", path_str);
 
     // Get route configuration with priority handling
     let route = {
         let config_guard = config.read().await;
-        
+
         // Normalize the request path
         let normalized_path = path_str.trim_end_matches('/');
         tracing::info!("Normalized path: {}", normalized_path);
-        
+
         // Find all matching routes
-        let mut matching_routes: Vec<_> = config_guard.routes.iter()
+        let mut matching_routes: Vec<_> = config_guard
+            .routes
+            .iter()
             .filter_map(|(route_path, route)| {
                 let normalized_route = route_path.trim_end_matches('/');
-                
+
                 let is_match = if route_path == "/" {
                     true
                 } else {
-                    normalized_path == normalized_route || 
-                    normalized_path.starts_with(&format!("{}/", normalized_route))
+                    normalized_path == normalized_route
+                        || normalized_path.starts_with(&format!("{}/", normalized_route))
                 };
 
                 if is_match {
@@ -123,7 +132,7 @@ async fn handle_request(
                         route_path.to_string(),
                         route.clone(),
                         normalized_route.matches('/').count(),
-                        normalized_route.len()
+                        normalized_route.len(),
                     ))
                 } else {
                     None
@@ -134,13 +143,15 @@ async fn handle_request(
         matching_routes.sort_by(|a, b| {
             let a_priority = a.1.priority.unwrap_or(0);
             let b_priority = b.1.priority.unwrap_or(0);
-            
-            b_priority.cmp(&a_priority)
+
+            b_priority
+                .cmp(&a_priority)
                 .then(b.2.cmp(&a.2))
                 .then(b.3.cmp(&a.3))
         });
 
-        matching_routes.into_iter()
+        matching_routes
+            .into_iter()
             .next()
             .ok_or_else(|| {
                 let err = format!("No route found for path: {}", normalized_path);
@@ -165,29 +176,32 @@ async fn handle_request(
     // Parse upstream URI
     let upstream_uri = reqwest::Url::from_str(&route.1.upstream)
         .map_err(|_| warp::reject::custom(InvalidUpstreamUrl))?;
-    
+
     // Build the final URL
     let mut final_url = upstream_uri.clone();
-    
+
     // Handle path joining properly
     let upstream_path = upstream_uri.path().trim_end_matches('/');
-    
+
     // Strip the matching route prefix from the request path
     let request_path = if route.0 == "/" {
         path_str
     } else {
         &path_str[route.0.len()..]
-    }.trim_start_matches('/');
-    
+    }
+    .trim_start_matches('/');
+
     // If upstream path is not empty and not just "/", combine it with request path
     let final_path = if upstream_path.is_empty() || upstream_path == "/" {
         format!("/{}", request_path)
     } else {
         format!("{}/{}", upstream_path, request_path)
-    }.trim_end_matches('/').to_string();
-    
+    }
+    .trim_end_matches('/')
+    .to_string();
+
     final_url.set_path(&final_path);
-    
+
     // Handle query string properly - strip any leading '?' if present
     if !query.is_empty() {
         let clean_query = query.trim_start_matches('?');
@@ -201,7 +215,7 @@ async fn handle_request(
     // Send request with timeout and retry logic
     let timeout = route.1.timeout_ms.unwrap_or(3000);
     let retry_count = route.1.retry_count.unwrap_or(2);
-    
+
     let mut response = None;
     for attempt in 0..=retry_count {
         let mut req_builder = client
@@ -236,33 +250,46 @@ async fn handle_request(
     // Record metrics
     let duration = start.elapsed();
     histogram!("proxy.request.duration", duration.as_secs_f64());
-    counter!("proxy.request.priority", route.1.priority.unwrap_or(0) as u64);
+    counter!(
+        "proxy.request.priority",
+        route.1.priority.unwrap_or(0) as u64
+    );
 
     match response {
         Some(resp) => {
             counter!("proxy.request.success", 1);
-            tracing::info!("Successfully proxied request for path: {} -> {}", path_str, final_url);
-            
+            tracing::info!(
+                "Successfully proxied request for path: {} -> {}",
+                path_str,
+                final_url
+            );
+
             // Convert reqwest response to warp response
             let status = resp.status().as_u16();
-            let mut builder = warp::http::Response::builder()
-                .status(status);
+            let mut builder = warp::http::Response::builder().status(status);
 
             // Convert response headers
             if let Some(headers) = builder.headers_mut() {
                 for (key, value) in resp.headers() {
-                    if let Ok(name) = warp::http::header::HeaderName::from_bytes(key.as_str().as_bytes()) {
-                        if let Ok(val) = warp::http::header::HeaderValue::from_bytes(value.as_bytes()) {
+                    if let Ok(name) =
+                        warp::http::header::HeaderName::from_bytes(key.as_str().as_bytes())
+                    {
+                        if let Ok(val) =
+                            warp::http::header::HeaderValue::from_bytes(value.as_bytes())
+                        {
                             headers.insert(name, val);
                         }
                     }
                 }
             }
 
-            let body_bytes = resp.bytes().await
+            let body_bytes = resp
+                .bytes()
+                .await
                 .map_err(|_| warp::reject::custom(UpstreamError))?;
-            
-            Ok(builder.body(body_bytes)
+
+            Ok(builder
+                .body(body_bytes)
                 .map_err(|_| warp::reject::custom(ResponseError))?)
         }
         None => {
