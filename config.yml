@@ -1,20 +1,56 @@
+# config.yml
 listen_addr: "0.0.0.0:8081"
 global_timeout_ms: 5000
 max_connections: 10000
 
+# TCP Proxy Configuration
+tcp_proxy:
+  enabled: true
+  listen_addr: "0.0.0.0:9090"
+  connection_pooling: true
+  max_idle_time_secs: 60
+
 routes:
+  # HTTP Routes
   "/api/critical":
     upstream: "http://critical-backend:8080"
     priority: 100
     timeout_ms: 1000
     retry_count: 3
+  
   "/api":
-    upstream: "http://localhost:8080/docs"
+    upstream: "http://backend-api:8080"
     priority: 50
     timeout_ms: 3000
     retry_count: 2
+  
+  # Default HTTP route
   "/":
-    upstream: "http://localhost:8080/"
+    upstream: "http://default-backend:8080"
     priority: 0
     timeout_ms: 5000
     retry_count: 1
+  
+  # Database Routes (automatically detected as TCP)
+  "mysql-primary":
+    upstream: "mysql://db-primary:3306"
+    is_tcp: true
+    db_type: "mysql"
+    timeout_ms: 10000
+    retry_count: 3
+  
+  "postgres-analytics":
+    upstream: "postgresql://analytics-db:5432"
+    is_tcp: true
+    db_type: "postgresql"
+    timeout_ms: 15000
+    retry_count: 2
+    tcp_listen_port: 5433  # Custom listening port
+  
+  # Generic TCP proxy (non-database)
+  "custom-tcp":
+    upstream: "tcp-service:9000"
+    is_tcp: true
+    timeout_ms: 5000
+    retry_count: 1
+    tcp_listen_port: 9001

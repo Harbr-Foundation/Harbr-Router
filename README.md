@@ -1,6 +1,6 @@
-# Harbr-Router: High-Performance Rust Reverse Proxy
+# Harbr-Router: High-Performance Rust Reverse Proxy with TCP Support
 
-A blazingly fast, memory-efficient reverse proxy built in Rust using async I/O and designed for high-scale production workloads.
+A blazingly fast, memory-efficient reverse proxy built in Rust using async I/O and designed for high-scale production workloads. Harbr-Router now supports both HTTP and raw TCP traffic, making it perfect for database proxying and other non-HTTP protocols.
 
 ## Features
 
@@ -12,6 +12,9 @@ A blazingly fast, memory-efficient reverse proxy built in Rust using async I/O a
 - 🔄 **Zero Downtime**: Graceful shutdown support
 - 🛡️ **Battle-tested**: Built on production-grade libraries
 - 🎯 **Path-based Routing**: Flexible route configuration
+- 🌐 **Protocol Agnostic**: Support for both HTTP and TCP traffic
+- 🗄️ **Database Support**: Automatic detection and handling of database protocols
+- 🔌 **Connection Pooling**: Efficient reuse of TCP connections for better performance
 
 ## Quick Start
 
@@ -26,12 +29,26 @@ listen_addr: "0.0.0.0:8080"
 global_timeout_ms: 5000
 max_connections: 10000
 
+# TCP Proxy Configuration
+tcp_proxy:
+  enabled: true
+  listen_addr: "0.0.0.0:9090"
+  connection_pooling: true
+  max_idle_time_secs: 60
+
 routes:
+  # HTTP Routes
   "/api":
     upstream: "http://backend-api:8080"
-    health_check_path: "/health"
     timeout_ms: 3000
     retry_count: 2
+  
+  # Database Route (automatically handled as TCP)
+  "postgres-db":
+    upstream: "postgresql://postgres-db:5432"
+    is_tcp: true
+    db_type: "postgresql"
+    timeout_ms: 10000
 ```
 
 3. Run the proxy:
@@ -45,13 +62,22 @@ harbr-router -c config.yml
 
 | Field | Type | Description | Default |
 |-------|------|-------------|---------|
-| `listen_addr` | String | Address and port to listen on | Required |
+| `listen_addr` | String | Address and port to listen on for HTTP | Required |
 | `global_timeout_ms` | Integer | Global request timeout in milliseconds | Required |
 | `max_connections` | Integer | Maximum number of concurrent connections | Required |
 
-### Route Configuration
+### TCP Proxy Configuration
 
-Each route is defined by a path prefix and its configuration:
+| Field | Type | Description | Default |
+|-------|------|-------------|---------|
+| `enabled` | Boolean | Enable TCP proxy functionality | `false` |
+| `listen_addr` | String | Address and port for TCP listener | `0.0.0.0:9090` |
+| `connection_pooling` | Boolean | Enable connection pooling for TCP | `true` |
+| `max_idle_time_secs` | Integer | Max time to keep idle connections | `60` |
+
+### HTTP Route Configuration
+
+Each HTTP route is defined by a path prefix and its configuration:
 
 | Field | Type | Description | Default |
 |-------|------|-------------|---------|
@@ -60,12 +86,26 @@ Each route is defined by a path prefix and its configuration:
 | `timeout_ms` | Integer | Route-specific timeout in ms | Global timeout |
 | `retry_count` | Integer | Number of retry attempts | 0 |
 
+### TCP/Database Route Configuration
+
+TCP routes use the same configuration structure with additional fields:
+
+| Field | Type | Description | Default |
+|-------|------|-------------|---------|
+| `is_tcp` | Boolean | Mark route as TCP instead of HTTP | `false` |
+| `db_type` | String | Database type (mysql, postgresql, etc.) | Optional |
+| `tcp_listen_port` | Integer | Custom port for this TCP service | Optional |
+
 ### Example Configuration
 
 ```yaml
 listen_addr: "0.0.0.0:8080"
 global_timeout_ms: 5000
 max_connections: 10000
+
+tcp_proxy:
+  enabled: true
+  listen_addr: "0.0.0.0:9090"
 
 routes:
   "/api":
@@ -77,49 +117,72 @@ routes:
   "/static":
     upstream: "http://static-server:80"
     timeout_ms: 1000
-    retry_count: 1
   
   "/":
     upstream: "http://default-backend:8080"
     timeout_ms: 2000
-    retry_count: 2
+  
+  # Database Routes
+  "mysql-primary":
+    upstream: "mysql://db-primary:3306"
+    is_tcp: true
+    db_type: "mysql"
+    timeout_ms: 10000
+    retry_count: 3
+  
+  "postgres-analytics":
+    upstream: "postgresql://analytics-db:5432"
+    is_tcp: true
+    db_type: "postgresql"
+    tcp_listen_port: 5433  # Custom listening port
 ```
 
-### Route Matching
+## Database Support
 
-- Routes are matched by prefix
-- More specific routes take precedence
-- The "/" route acts as a catch-all default
-- Health checks run on the specified path for each upstream
+Harbr-Router now includes automatic detection and support for common database protocols:
+
+- **MySQL/MariaDB** (ports 3306, 33060)
+- **PostgreSQL** (port 5432)
+- **MongoDB** (ports 27017, 27018, 27019)
+- **Redis** (port 6379)
+- **Oracle** (port 1521)
+- **SQL Server** (port 1433)
+- **Cassandra** (port 9042)
+- **CouchDB** (port 5984)
+- **InfluxDB** (port 8086)
+- **Elasticsearch** (ports 9200, 9300)
+
+Database connections are automatically detected by:
+1. Explicit configuration (`is_tcp: true` and `db_type: "..."`)
+2. Port numbers in the upstream URL
+3. Protocol prefixes (mysql://, postgresql://, etc.)
+
+## TCP Proxy Operation
+
+The TCP proxy operates by:
+
+1. Accepting connections on the configured TCP listening port
+2. Forwarding traffic to the appropriate upstream
+3. Maintaining connection pooling for better performance
+4. Applying timeouts and retries as configured
 
 ## Metrics
 
-The proxy exposes Prometheus-compatible metrics at `/metrics`:
+The proxy now exposes additional TCP proxy metrics at `/metrics`:
 
 ### Counter Metrics
 
 | Metric | Labels | Description |
 |--------|--------|-------------|
-| `proxy_request_total` | `status=success\|error` | Total requests |
-| `proxy_attempt_total` | `result=success\|failure\|timeout` | Request attempts |
-| `proxy_timeout_total` | - | Total timeouts |
+| `tcp_proxy.connection.new` | - | New TCP connections created |
+| `tcp_proxy.connection.completed` | - | Completed TCP connections |
+| `tcp_proxy.timeout` | - | TCP connection timeouts |
 
 ### Histogram Metrics
 
 | Metric | Description |
 |--------|-------------|
-| `proxy_request_duration_seconds` | Request duration histogram |
-
-## Health Checks
-
-Health checks are performed on the specified `health_check_path` for each upstream:
-
-- Method: GET
-- Interval: 10 seconds
-- Success: 200-299 status code
-- Timeout: 5 seconds
-
-Failed health checks will remove the upstream from the pool until it recovers.
+| `tcp_proxy.connection.duration_seconds` | TCP connection duration histogram |
 
 ## Production Deployment
 
@@ -144,13 +207,16 @@ services:
   proxy:
     image: harbr-router:latest
     ports:
-      - "8080:8080"
+      - "8080:8080"  # HTTP
+      - "9090:9090"  # TCP
     volumes:
       - ./config.yml:/etc/harbr-router/config.yml
     command: ["-c", "/etc/harbr-router/config.yml"]
 ```
 
 ### Kubernetes
+
+A ConfigMap example with both HTTP and TCP configuration:
 
 ```yaml
 apiVersion: v1
@@ -162,41 +228,22 @@ data:
     listen_addr: "0.0.0.0:8080"
     global_timeout_ms: 5000
     max_connections: 10000
+    tcp_proxy:
+      enabled: true
+      listen_addr: "0.0.0.0:9090"
     routes:
       "/api":
         upstream: "http://backend-api:8080"
         health_check_path: "/health"
         timeout_ms: 3000
-        retry_count: 2
-
----
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: harbr-router
-spec:
-  replicas: 3
-  template:
-    spec:
-      containers:
-      - name: harbr-router
-        image: harbr-router:latest
-        ports:
-        - containerPort: 8080
-        volumeMounts:
-        - name: config
-          mountPath: /etc/harbr-router
-      volumes:
-      - name: config
-        configMap:
-          name: harbr-router-config
+      "postgres-db":
+        upstream: "postgresql://postgres-db:5432"
+        is_tcp: true
 ```
 
 ## Performance Tuning
 
-### System Limits
-
-For high-performance deployments, adjust system limits:
+For high-performance deployments with TCP traffic, adjust system limits:
 
 ```bash
 # /etc/sysctl.conf
@@ -204,16 +251,17 @@ net.core.somaxconn = 65535
 net.ipv4.tcp_max_syn_backlog = 65535
 net.ipv4.ip_local_port_range = 1024 65535
 net.ipv4.tcp_tw_reuse = 1
+fs.file-max = 2097152  # Increased for high TCP connection count
 ```
 
-### Runtime Configuration
+## Use Cases
 
-Set these environment variables for optimal performance:
-
-```bash
-export RUST_MIN_THREADS=4
-export RUST_MAX_THREADS=32
-```
+- **Database Load Balancing**: Distribute database connections across multiple nodes
+- **Database Connection Limiting**: Control the maximum connections to your database
+- **Database Proxying**: Put your databases behind a secure proxy layer
+- **Protocol Conversion**: Use as a bridge between different network protocols
+- **Edge Proxy**: Use as an edge proxy for both HTTP and non-HTTP traffic
+- **Multi-Protocol Gateway**: Handle mixed HTTP/TCP traffic at the edge
 
 ## Contributing
 
