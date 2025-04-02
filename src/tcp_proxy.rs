@@ -23,14 +23,17 @@ pub struct TcpProxyServer {
 
 impl TcpProxyServer {
     pub fn new(config: SharedConfig) -> Self {
+        let max_idle_time_secs = {
+            let cfg = config.read().unwrap();
+            cfg.tcp_proxy.max_idle_time_secs.unwrap_or(60)
+        };
         Self {
             config,
             connection_cache: Arc::new(DashMap::new()),
-            max_idle_time: Duration::from_secs(60),
+            max_idle_time: Duration::from_secs(max_idle_time_secs),
             pooled_connections: true,
         }
     }
-
     pub async fn run(&self, addr: &str) -> io::Result<()> {
         let listener = TcpListener::bind(addr).await?;
         tracing::info!("TCP proxy listening on {}", addr);
