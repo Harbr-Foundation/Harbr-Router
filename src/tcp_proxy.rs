@@ -1,5 +1,5 @@
 // src/tcp_proxy.rs
-use crate::config::{ProxyConfig, RouteConfig};
+use crate::config::ProxyConfig;
 use dashmap::DashMap;
 use metrics::{counter, histogram};
 use std::io;
@@ -22,10 +22,10 @@ pub struct TcpProxyServer {
 }
 
 impl TcpProxyServer {
-    pub fn new(config: SharedConfig) -> Self {
+    pub async fn new(config: SharedConfig) -> Self {
         let max_idle_time_secs = {
-            let cfg = config.read().unwrap();
-            cfg.tcp_proxy.max_idle_time_secs.unwrap_or(60)
+            let cfg = config.read().await;
+            cfg.tcp_proxy.max_idle_time_secs
         };
         Self {
             config,

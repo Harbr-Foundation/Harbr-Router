@@ -34,7 +34,7 @@ async fn main() -> Result<()> {
         
         // Spawn TCP proxy server in a separate task
         tokio::spawn(async move {
-            let tcp_proxy = tcp_proxy::TcpProxyServer::new(tcp_config);
+            let tcp_proxy = tcp_proxy::TcpProxyServer::new(tcp_config).await;
             if let Err(e) = tcp_proxy.run(&config.tcp_proxy.listen_addr).await {
                 tracing::error!("TCP proxy server error: {}", e);
             }
