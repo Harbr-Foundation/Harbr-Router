@@ -1,3 +1,4 @@
+// src/config.rs (updated)
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -25,6 +26,10 @@ pub struct TcpProxyConfig {
     pub connection_pooling: bool,
     #[serde(default = "default_tcp_max_idle_time_secs")]
     pub max_idle_time_secs: u64,
+    #[serde(default = "default_udp_enabled")]
+    pub udp_enabled: bool,
+    #[serde(default = "default_udp_listen_addr")]
+    pub udp_listen_addr: String,
 }
 
 fn default_tcp_enabled() -> bool {
@@ -43,6 +48,14 @@ fn default_tcp_max_idle_time_secs() -> u64 {
     60
 }
 
+fn default_udp_enabled() -> bool {
+    false
+}
+
+fn default_udp_listen_addr() -> String {
+    "0.0.0.0:9090".to_string() // Same port as TCP by default
+}
+
 #[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
 pub struct RouteConfig {
     pub upstream: String,
@@ -52,11 +65,19 @@ pub struct RouteConfig {
     pub priority: Option<i32>,
     pub preserve_host_header: Option<bool>,
     
-    // New TCP-specific configuration
+    // TCP-specific configuration
     #[serde(default = "default_is_tcp")]
     pub is_tcp: bool,
     #[serde(default = "default_tcp_port")]
     pub tcp_listen_port: Option<u16>,
+    
+    // UDP-specific configuration
+    #[serde(default = "default_is_udp")]
+    pub is_udp: Option<bool>,
+    #[serde(default = "default_udp_port")]
+    pub udp_listen_port: Option<u16>,
+    
+    // Database-specific configuration
     #[serde(default = "default_db_type")]
     pub db_type: Option<String>,
 }
@@ -66,6 +87,14 @@ fn default_is_tcp() -> bool {
 }
 
 fn default_tcp_port() -> Option<u16> {
+    None
+}
+
+fn default_is_udp() -> Option<bool> {
+    Some(false)
+}
+
+fn default_udp_port() -> Option<u16> {
     None
 }
 

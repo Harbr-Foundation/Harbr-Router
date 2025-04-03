@@ -1,20 +1,21 @@
-# Harbr-Router: High-Performance Rust Reverse Proxy with TCP Support
+# Harbr-Router: High-Performance Universal Proxy
 
-A blazingly fast, memory-efficient reverse proxy built in Rust using async I/O and designed for high-scale production workloads. Harbr-Router now supports both HTTP and raw TCP traffic, making it perfect for database proxying and other non-HTTP protocols.
+A blazingly fast, memory-efficient multi-protocol proxy built in Rust using async I/O and designed for high-scale production workloads. Harbr-Router supports HTTP, TCP, and UDP traffic through a unified configuration interface.
 
 ## Features
 
 - ⚡ **High Performance**: Built on Tokio and Hyper for maximum throughput
 - 🔄 **Automatic Retries**: Configurable retry logic for failed requests
 - ⏱️ **Smart Timeouts**: Per-route and global timeout configuration
-- 🔍 **Health Checks**: Built-in health check support for upstreams
 - 📊 **Metrics**: Prometheus-compatible metrics for monitoring
 - 🔄 **Zero Downtime**: Graceful shutdown support
 - 🛡️ **Battle-tested**: Built on production-grade libraries
-- 🎯 **Path-based Routing**: Flexible route configuration
-- 🌐 **Protocol Agnostic**: Support for both HTTP and TCP traffic
+- 🌐 **Protocol Agnostic**: Support for HTTP, TCP, and UDP traffic
 - 🗄️ **Database Support**: Automatic detection and handling of database protocols
 - 🔌 **Connection Pooling**: Efficient reuse of TCP connections for better performance
+- 🔄 **UDP Proxying**: Support for stateless UDP protocols (DNS, syslog, game servers)
+- 🎯 **Path-based Routing**: Flexible route configuration for HTTP
+- 🔍 **Health Checks**: Built-in health check support for HTTP upstreams
 
 ## Quick Start
 
@@ -29,12 +30,14 @@ listen_addr: "0.0.0.0:8080"
 global_timeout_ms: 5000
 max_connections: 10000
 
-# TCP Proxy Configuration
+# TCP/UDP Proxy Configuration
 tcp_proxy:
   enabled: true
   listen_addr: "0.0.0.0:9090"
   connection_pooling: true
   max_idle_time_secs: 60
+  udp_enabled: true
+  udp_listen_addr: "0.0.0.0:9090"  # Same port as TCP
 
 routes:
   # HTTP Routes
@@ -43,12 +46,24 @@ routes:
     timeout_ms: 3000
     retry_count: 2
   
+  # Default HTTP route
+  "/":
+    upstream: "http://default-backend:8080"
+    timeout_ms: 5000
+    retry_count: 1
+  
   # Database Route (automatically handled as TCP)
   "postgres-db":
     upstream: "postgresql://postgres-db:5432"
     is_tcp: true
     db_type: "postgresql"
     timeout_ms: 10000
+    
+  # UDP Route
+  "dns-service":
+    upstream: "dns-server:53"
+    is_udp: true
+    timeout_ms: 1000
 ```
 
 3. Run the proxy:
@@ -66,7 +81,7 @@ harbr-router -c config.yml
 | `global_timeout_ms` | Integer | Global request timeout in milliseconds | Required |
 | `max_connections` | Integer | Maximum number of concurrent connections | Required |
 
-### TCP Proxy Configuration
+### TCP/UDP Proxy Configuration
 
 | Field | Type | Description | Default |
 |-------|------|-------------|---------|
@@ -74,6 +89,8 @@ harbr-router -c config.yml
 | `listen_addr` | String | Address and port for TCP listener | `0.0.0.0:9090` |
 | `connection_pooling` | Boolean | Enable connection pooling for TCP | `true` |
 | `max_idle_time_secs` | Integer | Max time to keep idle connections | `60` |
+| `udp_enabled` | Boolean | Enable UDP proxy functionality | `false` |
+| `udp_listen_addr` | String | Address and port for UDP listener | Same as TCP |
 
 ### HTTP Route Configuration
 
@@ -85,16 +102,20 @@ Each HTTP route is defined by a path prefix and its configuration:
 | `health_check_path` | String | Path for health checks | Optional |
 | `timeout_ms` | Integer | Route-specific timeout in ms | Global timeout |
 | `retry_count` | Integer | Number of retry attempts | 0 |
+| `priority` | Integer | Route priority (higher wins) | 0 |
+| `preserve_host_header` | Boolean | Preserve original Host header | `false` |
 
-### TCP/Database Route Configuration
+### TCP/UDP/Database Route Configuration
 
-TCP routes use the same configuration structure with additional fields:
+Non-HTTP routes use the same configuration structure with additional fields:
 
 | Field | Type | Description | Default |
 |-------|------|-------------|---------|
 | `is_tcp` | Boolean | Mark route as TCP instead of HTTP | `false` |
+| `is_udp` | Boolean | Mark route as UDP instead of TCP/HTTP | `false` |
 | `db_type` | String | Database type (mysql, postgresql, etc.) | Optional |
 | `tcp_listen_port` | Integer | Custom port for this TCP service | Optional |
+| `udp_listen_port` | Integer | Custom port for this UDP service | Optional |
 
 ### Example Configuration
 
@@ -106,8 +127,17 @@ max_connections: 10000
 tcp_proxy:
   enabled: true
   listen_addr: "0.0.0.0:9090"
+  udp_enabled: true
+  udp_listen_addr: "0.0.0.0:9090"  # Same port as TCP
 
 routes:
+  # HTTP Routes
+  "/api/critical":
+    upstream: "http://critical-backend:8080"
+    priority: 100
+    timeout_ms: 1000
+    retry_count: 3
+  
   "/api":
     upstream: "http://backend-api:8080"
     health_check_path: "/health"
@@ -135,11 +165,22 @@ routes:
     is_tcp: true
     db_type: "postgresql"
     tcp_listen_port: 5433  # Custom listening port
+    
+  # UDP Routes
+  "dns-service":
+    upstream: "dns-server:53"
+    is_udp: true
+    timeout_ms: 1000
+  
+  "syslog-collector":
+    upstream: "logging-service:514"
+    is_udp: true
+    timeout_ms: 2000
 ```
 
 ## Database Support
 
-Harbr-Router now includes automatic detection and support for common database protocols:
+Harbr-Router automatically detects and supports common database protocols:
 
 - **MySQL/MariaDB** (ports 3306, 33060)
 - **PostgreSQL** (port 5432)
@@ -157,6 +198,28 @@ Database connections are automatically detected by:
 2. Port numbers in the upstream URL
 3. Protocol prefixes (mysql://, postgresql://, etc.)
 
+## UDP Protocol Support
+
+Harbr-Router provides first-class support for UDP-based protocols:
+
+- **DNS** (port 53)
+- **Syslog** (port 514)
+- **SNMP** (port 161)
+- **NTP** (port 123)
+- **Game server protocols**
+- **Custom UDP services**
+
+UDP connections are explicitly configured with:
+- `is_udp: true` in the route configuration
+- Setting the upstream destination in the standard format
+
+## HTTP Route Matching
+
+- Routes are matched by prefix (most specific wins)
+- Priority can be explicitly set (higher number = higher priority)
+- More specific routes take precedence when priority is equal
+- The "/" route acts as a catch-all default
+
 ## TCP Proxy Operation
 
 The TCP proxy operates by:
@@ -166,23 +229,42 @@ The TCP proxy operates by:
 3. Maintaining connection pooling for better performance
 4. Applying timeouts and retries as configured
 
+## UDP Proxy Operation
+
+The UDP proxy operates by:
+
+1. Receiving datagrams on the configured UDP listening port
+2. Determining the appropriate upstream based on client address or first packet
+3. Forwarding datagrams to the upstream destination
+4. Relaying responses back to the original client
+
 ## Metrics
 
-The proxy now exposes additional TCP proxy metrics at `/metrics`:
+The proxy exposes Prometheus-compatible metrics at `/metrics`:
 
 ### Counter Metrics
 
 | Metric | Labels | Description |
 |--------|--------|-------------|
+| `proxy_request_total` | `status=success\|error` | HTTP requests total |
+| `proxy_attempt_total` | `result=success\|failure\|timeout` | HTTP request attempts |
+| `proxy_timeout_total` | - | HTTP timeouts |
 | `tcp_proxy.connection.new` | - | New TCP connections created |
 | `tcp_proxy.connection.completed` | - | Completed TCP connections |
 | `tcp_proxy.timeout` | - | TCP connection timeouts |
+| `udp_proxy.datagram.received` | - | UDP datagrams received |
+| `udp_proxy.datagram.forwarded` | - | UDP datagrams forwarded |
+| `udp_proxy.datagram.response_sent` | - | UDP responses sent back to clients |
+| `udp_proxy.timeout` | - | UDP timeout counter |
+| `udp_proxy.unexpected_source` | - | Responses from unexpected sources |
 
 ### Histogram Metrics
 
 | Metric | Description |
 |--------|-------------|
+| `proxy_request_duration_seconds` | HTTP request duration histogram |
 | `tcp_proxy.connection.duration_seconds` | TCP connection duration histogram |
+| `udp_proxy.datagram.duration` | UDP transaction duration histogram |
 
 ## Production Deployment
 
@@ -195,8 +277,16 @@ COPY . .
 RUN cargo build --release
 
 FROM debian:bullseye-slim
+RUN apt-get update && apt-get install -y ca-certificates tzdata && rm -rf /var/lib/apt/lists/*
 COPY --from=builder /usr/src/harbr-router/target/release/harbr-router /usr/local/bin/
+RUN mkdir -p /etc/harbr-router
+RUN useradd -r -U -s /bin/false harbr && chown -R harbr:harbr /etc/harbr-router
+USER harbr
+WORKDIR /etc/harbr-router
+ENV CONFIG_FILE="/etc/harbr-router/config.yml"
+EXPOSE 8080 9090
 ENTRYPOINT ["harbr-router"]
+CMD ["-c", "/etc/harbr-router/config.yml"]
 ```
 
 ### Docker Compose
@@ -208,15 +298,18 @@ services:
     image: harbr-router:latest
     ports:
       - "8080:8080"  # HTTP
-      - "9090:9090"  # TCP
+      - "9090:9090/tcp"  # TCP
+      - "9090:9090/udp"  # UDP
     volumes:
       - ./config.yml:/etc/harbr-router/config.yml
+    environment:
+      - RUST_LOG=info
     command: ["-c", "/etc/harbr-router/config.yml"]
 ```
 
 ### Kubernetes
 
-A ConfigMap example with both HTTP and TCP configuration:
+A ConfigMap example with HTTP, TCP, and UDP configuration:
 
 ```yaml
 apiVersion: v1
@@ -231,6 +324,8 @@ data:
     tcp_proxy:
       enabled: true
       listen_addr: "0.0.0.0:9090"
+      udp_enabled: true
+      udp_listen_addr: "0.0.0.0:9090"
     routes:
       "/api":
         upstream: "http://backend-api:8080"
@@ -239,11 +334,14 @@ data:
       "postgres-db":
         upstream: "postgresql://postgres-db:5432"
         is_tcp: true
+      "dns-service":
+        upstream: "kube-dns.kube-system:53"
+        is_udp: true
 ```
 
 ## Performance Tuning
 
-For high-performance deployments with TCP traffic, adjust system limits:
+For high-performance deployments with TCP and UDP traffic, adjust system limits:
 
 ```bash
 # /etc/sysctl.conf
@@ -251,22 +349,23 @@ net.core.somaxconn = 65535
 net.ipv4.tcp_max_syn_backlog = 65535
 net.ipv4.ip_local_port_range = 1024 65535
 net.ipv4.tcp_tw_reuse = 1
-fs.file-max = 2097152  # Increased for high TCP connection count
+fs.file-max = 2097152  # Increased for high connection count
+net.core.rmem_max = 26214400  # Increase UDP receive buffer
+net.core.wmem_max = 26214400  # Increase UDP send buffer
 ```
 
 ## Use Cases
 
-- **Database Load Balancing**: Distribute database connections across multiple nodes
-- **Database Connection Limiting**: Control the maximum connections to your database
-- **Database Proxying**: Put your databases behind a secure proxy layer
-- **Protocol Conversion**: Use as a bridge between different network protocols
-- **Edge Proxy**: Use as an edge proxy for both HTTP and non-HTTP traffic
-- **Multi-Protocol Gateway**: Handle mixed HTTP/TCP traffic at the edge
+- **Multi-Protocol API Gateway**: Handle HTTP, TCP, and UDP services with a single proxy
+- **Database Connection Management**: Control database connections with pooling and timeouts
+- **Microservice Architecture**: Route traffic between internal services
+- **Edge Proxy**: Use as an edge proxy for all protocols
+- **IoT Gateway**: Handle diverse protocols used by IoT devices
+- **Game Server Infrastructure**: Proxy both TCP and UDP game traffic
 
 ## Contributing
 
-Contributions are welcome! Please read our [Contributing Guide](CONTRIBUTING.md) for details on our code of conduct and the process for submitting pull requests.
-
+Contributions are welcome!
 ## License
 
 This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
