@@ -43,7 +43,7 @@ pub async fn run_server(
         shutdown_signal().await;
     });
 
-    tracing::info!("Reverse proxy listening on {}", addr);
+    tracing::info!("HTTP proxy listening on {}", addr);
     server.await;
     Ok(())
 }
