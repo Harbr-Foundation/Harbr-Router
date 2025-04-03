@@ -131,11 +131,10 @@ impl UdpProxyServer {
             if let Some(dest) = destination_map.get(&client_addr) {
                 dest.clone()
             } else {
-                // For UDP, we need to determine the route based on client info
+                // ToDo: For UDP, we need to determine the route based on client info
                 // or the contents of the first packet
-                // This is a simplified implementation - in a real-world scenario,
-                // you might need more sophisticated logic to determine the correct route
-
+                // This is a simplified implementation
+                
                 // For now, use the first UDP route in the config
                 let config_guard = config.read().await;
                 let udp_route = config_guard.routes.iter()
