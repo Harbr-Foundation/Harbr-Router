@@ -1,4 +1,6 @@
+// src/http_proxy.rs
 use crate::config;
+use crate::dynamic_config::SharedConfig;
 use dashmap::DashMap;
 use metrics::{counter, histogram};
 use reqwest::Client;
@@ -7,18 +9,25 @@ use std::net::SocketAddr;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Instant;
-use tokio::sync::RwLock;
+use tokio::sync::{broadcast, mpsc, RwLock};
 use warp::http::header::HeaderMap;
 use warp::{path::FullPath, Filter, Rejection, Reply};
 
-type SharedConfig = Arc<RwLock<config::ProxyConfig>>;
 type BackendCache = Arc<DashMap<String, Client>>;
 
 pub async fn run_server(
     config: SharedConfig,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    // Create a channel for graceful shutdown
+    let (shutdown_tx, mut shutdown_rx) = mpsc::channel::<()>(1);
+    
     // Parse the socket address
-    let addr = SocketAddr::from_str(&config.read().await.listen_addr)
+    let addr_str = {
+        let guard = config.read().await;
+        guard.listen_addr.clone()
+    };
+    
+    let addr = SocketAddr::from_str(&addr_str)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?;
 
     let backend_cache: BackendCache = Arc::new(DashMap::new());
@@ -38,13 +47,29 @@ pub async fn run_server(
         .and(with_cache(backend_cache.clone()))
         .and_then(handle_request);
 
+    // Add route for metrics
+    let routes = routes.or(warp::path("metrics").and_then(metrics_handler));
+
     // Start the server with graceful shutdown
-    let (_, server) = warp::serve(routes).bind_with_graceful_shutdown(addr, async {
-        shutdown_signal().await;
-    });
+    let (_, server) = warp::serve(routes)
+        .bind_with_graceful_shutdown(addr, async move {
+            let _ = shutdown_rx.recv().await;
+            tracing::info!("HTTP proxy shutting down gracefully");
+        });
 
     tracing::info!("HTTP proxy listening on {}", addr);
-    server.await;
+    
+    // Wait for server to complete or shutdown signal
+    tokio::select! {
+        _ = server => {
+            tracing::info!("HTTP server has shut down");
+        }
+        _ = tokio::signal::ctrl_c() => {
+            tracing::info!("Shutdown signal received, stopping HTTP server");
+            let _ = shutdown_tx.send(()).await;
+        }
+    }
+    
     Ok(())
 }
 
@@ -58,6 +83,21 @@ fn with_cache(
     cache: BackendCache,
 ) -> impl Filter<Extract = (BackendCache,), Error = Infallible> + Clone {
     warp::any().map(move || cache.clone())
+}
+
+async fn metrics_handler() -> Result<impl Reply, Rejection> {
+    use metrics_exporter_prometheus::PrometheusHandle;
+    use std::sync::OnceLock;
+    
+    static PROMETHEUS_HANDLE: OnceLock<PrometheusHandle> = OnceLock::new();
+    
+    let handle = PROMETHEUS_HANDLE.get_or_init(|| {
+        metrics_exporter_prometheus::PrometheusBuilder::new()
+            .install_recorder()
+            .expect("Failed to install Prometheus recorder")
+    });
+    
+    Ok(handle.render())
 }
 
 // Convert warp/http types to reqwest types
@@ -103,7 +143,7 @@ async fn handle_request(
     let start = Instant::now();
     let path_str = path.as_str();
 
-    tracing::info!("Processing request for path: {}", path_str);
+    tracing::debug!("Processing request for path: {}", path_str);
 
     // Get route configuration with priority handling
     let route = {
@@ -111,13 +151,18 @@ async fn handle_request(
 
         // Normalize the request path
         let normalized_path = path_str.trim_end_matches('/');
-        tracing::info!("Normalized path: {}", normalized_path);
+        tracing::debug!("Normalized path: {}", normalized_path);
 
-        // Find all matching routes
+        // Find all matching routes - taking advantage of real-time config
         let mut matching_routes: Vec<_> = config_guard
             .routes
             .iter()
             .filter_map(|(route_path, route)| {
+                // Skip TCP and UDP routes
+                if route.is_tcp || route.is_udp.unwrap_or(false) {
+                    return None;
+                }
+                
                 let normalized_route = route_path.trim_end_matches('/');
 
                 let is_match = if route_path == "/" {
@@ -140,6 +185,7 @@ async fn handle_request(
             })
             .collect();
 
+        // Sort by priority, then by specificity
         matching_routes.sort_by(|a, b| {
             let a_priority = a.1.priority.unwrap_or(0);
             let b_priority = b.1.priority.unwrap_or(0);
@@ -210,7 +256,7 @@ async fn handle_request(
         }
     }
 
-    tracing::info!("Forwarding to upstream URL: {}", final_url);
+    tracing::debug!("Forwarding to upstream URL: {}", final_url);
 
     // Send request with timeout and retry logic
     let timeout = route.1.timeout_ms.unwrap_or(3000);
@@ -258,7 +304,7 @@ async fn handle_request(
     match response {
         Some(resp) => {
             counter!("proxy.request.success", 1);
-            tracing::info!(
+            tracing::debug!(
                 "Successfully proxied request for path: {} -> {}",
                 path_str,
                 final_url
@@ -301,12 +347,6 @@ async fn handle_request(
                 .unwrap())
         }
     }
-}
-
-async fn shutdown_signal() {
-    tokio::signal::ctrl_c()
-        .await
-        .expect("Failed to install CTRL+C signal handler");
 }
 
 // Custom rejection types
