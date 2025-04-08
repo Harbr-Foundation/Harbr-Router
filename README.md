@@ -8,7 +8,7 @@ A blazingly fast, memory-efficient multi-protocol proxy built in Rust using asyn
 - 🔄 **Automatic Retries**: Configurable retry logic for failed requests
 - ⏱️ **Smart Timeouts**: Per-route and global timeout configuration
 - 📊 **Metrics**: Prometheus-compatible metrics for monitoring
-- 🔄 **Zero Downtime**: Graceful shutdown support
+- 🔄 **Zero Downtime**: Graceful shutdown and dynamic configuration support
 - 🛡️ **Battle-tested**: Built on production-grade libraries
 - 🌐 **Protocol Agnostic**: Support for HTTP, TCP, and UDP traffic
 - 🗄️ **Database Support**: Automatic detection and handling of database protocols
@@ -17,6 +17,7 @@ A blazingly fast, memory-efficient multi-protocol proxy built in Rust using asyn
 - 🎯 **Path-based Routing**: Flexible route configuration for HTTP
 - 🔍 **Health Checks**: Built-in health check support for HTTP upstreams
 - 📚 **Library API**: Use as a standalone binary or integrate as a library in your Rust applications
+- 🔁 **Dynamic Configuration**: Update routes and settings at runtime without restarts
 
 ## Quick Start
 
@@ -70,6 +71,11 @@ routes:
 3. Run the proxy:
 ```bash
 harbr-router -c config.yml
+```
+
+4. Enable dynamic configuration (optional):
+```bash
+harbr-router -c config.yml --enable-api --watch-config
 ```
 
 ## Using Harbr-Router as a Library
@@ -140,7 +146,7 @@ use anyhow::Result;
 #[tokio::main]
 async fn main() -> Result<()> {
     // Load configuration from a file
-    let router = Router::from_file("config.yml")?;
+    let router = Router::from_file("config.yml").await?;
     
     // Start the router
     router.start().await?;
@@ -149,7 +155,127 @@ async fn main() -> Result<()> {
 }
 ```
 
-### Library API Reference
+### Example: Dynamic Configuration Updates
+
+```rust
+use harbr_router::{Router, RouteConfig};
+use anyhow::Result;
+use std::sync::Arc;
+use tokio::time::sleep;
+use std::time::Duration;
+
+#[tokio::main]
+async fn main() -> Result<()> {
+    // Load configuration from a file
+    let router = Router::from_file("config.yml").await?;
+    
+    // Start the router in a separate task
+    let router_clone = router.clone();
+    tokio::spawn(async move {
+        router_clone.start().await.unwrap();
+    });
+    
+    // Wait for the router to initialize
+    sleep(Duration::from_secs(1)).await;
+    
+    // Update an existing route or add a new one at runtime
+    let updated_api_route = RouteConfig::new("http://new-api-backend:8080")
+        .with_timeout(2000)
+        .with_retry_count(3)
+        .with_priority(100);
+    
+    router.update_route("/api", updated_api_route).await?;
+    println!("Updated /api route with zero downtime");
+    
+    // Add a new route at runtime
+    let metrics_route = RouteConfig::new("http://metrics-server:9091")
+        .with_timeout(1000);
+    
+    router.add_route("/metrics", metrics_route).await?;
+    println!("Added /metrics route dynamically");
+
+    Ok(())
+}
+```
+
+## Dynamic Configuration
+
+Harbr-Router supports real-time configuration changes without requiring restarts or causing service interruptions. Configuration can be updated through:
+
+1. **Programmatic API**: Direct method calls on the Router struct
+2. **HTTP API**: RESTful API for remote management
+3. **File Watching**: Automatic detection of configuration file changes
+4. **CLI Tool**: Command-line interface for administrative tasks
+
+### Using the HTTP API
+
+Enable the API when starting the router:
+
+```bash
+harbr-router -c config.yml --enable-api --api-port 8082
+```
+
+Example API calls:
+
+```bash
+# Get current configuration
+curl http://localhost:8082/api/config
+
+# Add or update a route
+curl -X PUT http://localhost:8082/api/config/routes/api \
+    -H "Content-Type: application/json" \
+    -d '{"upstream":"http://new-backend:8080", "timeout_ms":3000}'
+
+# Delete a route
+curl -X DELETE http://localhost:8082/api/config/routes/api
+
+# Update TCP configuration
+curl -X PUT http://localhost:8082/api/config/tcp \
+    -H "Content-Type: application/json" \
+    -d '{"enabled":true, "listen_addr":"0.0.0.0:9090"}'
+
+# Update global settings
+curl -X PUT http://localhost:8082/api/config/global \
+    -H "Content-Type: application/json" \
+    -d '{"global_timeout_ms":10000}'
+
+# Reload configuration from file
+curl -X POST http://localhost:8082/api/config/reload
+```
+
+### Using the CLI Tool
+
+The harbr-cli tool provides a simple command-line interface for configuration management:
+
+```bash
+# Install the CLI tool
+cargo install harbr-cli
+
+# Add or update a route
+harbr-cli update route /api --upstream http://backend:8080 --timeout 3000
+
+# Delete a route
+harbr-cli delete route /api
+
+# Update TCP config
+harbr-cli update tcp --enabled true --listen-addr 0.0.0.0:9090
+
+# Update global settings
+harbr-cli update global --timeout 10000
+
+# View current configuration
+harbr-cli get config
+```
+
+### Automatic File Watching
+
+Enable automatic file watching to have Harbr-Router detect and apply configuration changes when the config file is modified:
+
+```bash
+harbr-router -c config.yml --watch-config --watch-interval 30
+```
+
+## Library API Reference
 
 The Harbr-Router library provides a fluent builder-style API for configuration:
 
@@ -162,10 +288,18 @@ The main struct that manages all proxy services:
 let router = Router::new(config);
 
 // Create a router from config file
-let router = Router::from_file("config.yml")?;
+let router = Router::from_file("config.yml").await?;
 
 // Start all enabled proxies
 router.start().await?;
+
+// Dynamic configuration updates
+router.add_route("/new-route", route_config).await?;
+router.update_route("/existing-route", updated_config).await?;
+router.remove_route("/old-route").await?;
+router.update_tcp_config(tcp_config).await?;
+router.update_global_settings(Some("0.0.0.0:8081"), Some(10000), Some(20000)).await?;
+router.reload_config().await?;
 ```
 
 #### ProxyConfig
@@ -431,9 +565,9 @@ RUN useradd -r -U -s /bin/false harbr && chown -R harbr:harbr /etc/harbr-router
 USER harbr
 WORKDIR /etc/harbr-router
 ENV CONFIG_FILE="/etc/harbr-router/config.yml"
-EXPOSE 8080 9090
+EXPOSE 8080 9090 8082
 ENTRYPOINT ["harbr-router"]
-CMD ["-c", "/etc/harbr-router/config.yml"]
+CMD ["-c", "/etc/harbr-router/config.yml", "--enable-api", "--watch-config"]
 ```
 
 ### Docker Compose
@@ -447,11 +581,12 @@ services:
       - "8080:8080"  # HTTP
       - "9090:9090/tcp"  # TCP
       - "9090:9090/udp"  # UDP
+      - "8082:8082"  # Config API (optional)
     volumes:
       - ./config.yml:/etc/harbr-router/config.yml
     environment:
       - RUST_LOG=info
-    command: ["-c", "/etc/harbr-router/config.yml"]
+    command: ["-c", "/etc/harbr-router/config.yml", "--enable-api", "--watch-config"]
 ```
 
 ### Kubernetes
@@ -486,6 +621,23 @@ data:
         is_udp: true
 ```
 
+## Zero Downtime Operations
+
+Harbr-Router is designed for zero downtime operations:
+
+1. **Dynamic Route Updates**: Add, modify, or remove routes without restarting
+2. **Graceful Shutdowns**: Complete in-flight requests before shutting down
+3. **Live Reloading**: Automatic application of configuration changes
+4. **Connection Handling**: Preserve existing connections while updating routes
+5. **Blue/Green Deployments**: Gradually shift traffic between backends
+
+Zero downtime operations are supported for:
+- Adding new routes
+- Changing upstream destinations
+- Modifying timeouts, retries, and priorities
+- Updating TCP/UDP configuration
+- Adjusting global settings
+
 ## Performance Tuning
 
 For high-performance deployments with TCP and UDP traffic, adjust system limits:
@@ -510,10 +662,12 @@ net.core.wmem_max = 26214400  # Increase UDP send buffer
 - **IoT Gateway**: Handle diverse protocols used by IoT devices
 - **Game Server Infrastructure**: Proxy both TCP and UDP game traffic
 - **Embedded Proxy**: Integrate proxy functionality directly into your Rust applications
+- **Dynamic Routing**: Update routing rules at runtime for flexible traffic management
 
 ## Contributing
 
 Contributions are welcome!
+
 ## License
 
 This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
@@ -525,3 +679,4 @@ Built with:
 - [Hyper](https://hyper.rs/) - HTTP implementation
 - [Tower](https://github.com/tower-rs/tower) - Service abstractions
 - [Metrics](https://metrics.rs/) - Metrics and monitoring
+- [Warp](https://github.com/seanmonstar/warp) - Web framework for API
