@@ -2,7 +2,7 @@
 name = "harbr_router"
 description = "A modular reverse proxy service written in Rust, designed for high performance and flexibility."
 license = "Apache-2.0"
-version = "0.1.2"
+version = "0.2.0"
 edition = "2021"
 
 [lib]
