@@ -1,4 +1,4 @@
-// src/config.rs (updated)
+// src/config.rs
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -16,6 +16,48 @@ pub struct ProxyConfig {
     pub tcp_proxy: TcpProxyConfig,
 }
 
+impl ProxyConfig {
+    pub fn new(listen_addr: &str, global_timeout_ms: u64, max_connections: usize) -> Self {
+        Self {
+            listen_addr: listen_addr.to_string(),
+            routes: HashMap::new(),
+            global_timeout_ms,
+            max_connections,
+            tcp_proxy: TcpProxyConfig::default(),
+        }
+    }
+
+    pub fn with_route(mut self, name: &str, route: RouteConfig) -> Self {
+        self.routes.insert(name.to_string(), route);
+        self
+    }
+
+    pub fn with_tcp_proxy(mut self, tcp_proxy: TcpProxyConfig) -> Self {
+        self.tcp_proxy = tcp_proxy;
+        self
+    }
+
+    pub fn enable_tcp_proxy(mut self, enabled: bool) -> Self {
+        self.tcp_proxy.enabled = enabled;
+        self
+    }
+
+    pub fn tcp_listen_addr(mut self, addr: &str) -> Self {
+        self.tcp_proxy.listen_addr = addr.to_string();
+        self
+    }
+
+    pub fn enable_udp_proxy(mut self, enabled: bool) -> Self {
+        self.tcp_proxy.udp_enabled = enabled;
+        self
+    }
+
+    pub fn udp_listen_addr(mut self, addr: &str) -> Self {
+        self.tcp_proxy.udp_listen_addr = addr.to_string();
+        self
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone, Default)]
 pub struct TcpProxyConfig {
     #[serde(default = "default_tcp_enabled")]
@@ -30,6 +72,42 @@ pub struct TcpProxyConfig {
     pub udp_enabled: bool,
     #[serde(default = "default_udp_listen_addr")]
     pub udp_listen_addr: String,
+}
+
+impl TcpProxyConfig {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn with_enabled(mut self, enabled: bool) -> Self {
+        self.enabled = enabled;
+        self
+    }
+
+    pub fn with_listen_addr(mut self, addr: &str) -> Self {
+        self.listen_addr = addr.to_string();
+        self
+    }
+
+    pub fn with_connection_pooling(mut self, enabled: bool) -> Self {
+        self.connection_pooling = enabled;
+        self
+    }
+
+    pub fn with_max_idle_time(mut self, secs: u64) -> Self {
+        self.max_idle_time_secs = secs;
+        self
+    }
+
+    pub fn with_udp_enabled(mut self, enabled: bool) -> Self {
+        self.udp_enabled = enabled;
+        self
+    }
+
+    pub fn with_udp_listen_addr(mut self, addr: &str) -> Self {
+        self.udp_listen_addr = addr.to_string();
+        self
+    }
 }
 
 fn default_tcp_enabled() -> bool {
@@ -80,6 +158,68 @@ pub struct RouteConfig {
     // Database-specific configuration
     #[serde(default = "default_db_type")]
     pub db_type: Option<String>,
+}
+
+impl RouteConfig {
+    pub fn new(upstream: &str) -> Self {
+        Self {
+            upstream: upstream.to_string(),
+            timeout_ms: None,
+            retry_count: None,
+            priority: None,
+            preserve_host_header: None,
+            is_tcp: false,
+            tcp_listen_port: None,
+            is_udp: None,
+            udp_listen_port: None,
+            db_type: None,
+        }
+    }
+
+    pub fn with_timeout(mut self, timeout_ms: u64) -> Self {
+        self.timeout_ms = Some(timeout_ms);
+        self
+    }
+
+    pub fn with_retry_count(mut self, count: u32) -> Self {
+        self.retry_count = Some(count);
+        self
+    }
+
+    pub fn with_priority(mut self, priority: i32) -> Self {
+        self.priority = Some(priority);
+        self
+    }
+
+    pub fn preserve_host_header(mut self, preserve: bool) -> Self {
+        self.preserve_host_header = Some(preserve);
+        self
+    }
+
+    pub fn as_tcp(mut self, is_tcp: bool) -> Self {
+        self.is_tcp = is_tcp;
+        self
+    }
+
+    pub fn with_tcp_listen_port(mut self, port: u16) -> Self {
+        self.tcp_listen_port = Some(port);
+        self
+    }
+
+    pub fn as_udp(mut self, is_udp: bool) -> Self {
+        self.is_udp = Some(is_udp);
+        self
+    }
+
+    pub fn with_udp_listen_port(mut self, port: u16) -> Self {
+        self.udp_listen_port = Some(port);
+        self
+    }
+
+    pub fn with_db_type(mut self, db_type: &str) -> Self {
+        self.db_type = Some(db_type.to_string());
+        self
+    }
 }
 
 fn default_is_tcp() -> bool {

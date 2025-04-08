@@ -16,6 +16,7 @@ A blazingly fast, memory-efficient multi-protocol proxy built in Rust using asyn
 - 🔄 **UDP Proxying**: Support for stateless UDP protocols (DNS, syslog, game servers)
 - 🎯 **Path-based Routing**: Flexible route configuration for HTTP
 - 🔍 **Health Checks**: Built-in health check support for HTTP upstreams
+- 📚 **Library API**: Use as a standalone binary or integrate as a library in your Rust applications
 
 ## Quick Start
 
@@ -69,6 +70,152 @@ routes:
 3. Run the proxy:
 ```bash
 harbr-router -c config.yml
+```
+
+## Using Harbr-Router as a Library
+
+Harbr-Router can be used as a library in your Rust applications, allowing you to embed proxy functionality directly without external configuration files.
+
+### Add to Your Project
+
+Add Harbr-Router to your `Cargo.toml`:
+
+```toml
+[dependencies]
+harbr_router = "0.1.0"
+```
+
+### Example: Creating a Router Programmatically
+
+```rust
+use harbr_router::{Router, ProxyConfig, RouteConfig, TcpProxyConfig};
+use anyhow::Result;
+
+#[tokio::main]
+async fn main() -> Result<()> {
+    // Initialize the configuration programmatically
+    let config = ProxyConfig::new("0.0.0.0:8080", 30000, 1000)
+        // Add HTTP routes
+        .with_route("api", 
+            RouteConfig::new("http://api-backend:8000")
+                .with_timeout(5000)
+                .with_retry_count(3)
+                .preserve_host_header(true)
+        )
+        .with_route("app", 
+            RouteConfig::new("http://web-app:3000")
+                .with_priority(10)
+        )
+        // Add database route (automatically handled as TCP)
+        .with_route("postgres", 
+            RouteConfig::new("postgresql://db.example.com:5432")
+                .with_db_type("postgresql")
+        )
+        // Add UDP route for metrics
+        .with_route("metrics", 
+            RouteConfig::new("metrics.internal:8125")
+                .as_udp(true)
+                .with_udp_listen_port(8125)
+        )
+        // Configure TCP and UDP proxy settings
+        .enable_tcp_proxy(true)
+        .tcp_listen_addr("0.0.0.0:9090")
+        .enable_udp_proxy(true)
+        .udp_listen_addr("0.0.0.0:9091");
+
+    // Create and start the router
+    let router = Router::new(config);
+    router.start().await?;
+
+    Ok(())
+}
+```
+
+### Example: Loading Configuration from a File
+
+```rust
+use harbr_router::Router;
+use anyhow::Result;
+
+#[tokio::main]
+async fn main() -> Result<()> {
+    // Load configuration from a file
+    let router = Router::from_file("config.yml")?;
+    
+    // Start the router
+    router.start().await?;
+
+    Ok(())
+}
+```
+
+### Library API Reference
+
+The Harbr-Router library provides a fluent builder-style API for configuration:
+
+#### Router
+
+The main struct that manages all proxy services:
+
+```rust
+// Create a new router with programmatic config
+let router = Router::new(config);
+
+// Create a router from config file
+let router = Router::from_file("config.yml")?;
+
+// Start all enabled proxies
+router.start().await?;
+```
+
+#### ProxyConfig
+
+Configuration for the entire proxy system:
+
+```rust
+// Create a new configuration
+let config = ProxyConfig::new(
+    "0.0.0.0:8080",  // HTTP listen address
+    30000,           // Global timeout in milliseconds
+    1000             // Max connections
+);
+
+// Add a route
+config = config.with_route("name", route_config);
+
+// Configure TCP proxy
+config = config
+    .enable_tcp_proxy(true)
+    .tcp_listen_addr("0.0.0.0:9090");
+    
+// Configure UDP proxy
+config = config
+    .enable_udp_proxy(true)
+    .udp_listen_addr("0.0.0.0:9091");
+```
+
+#### RouteConfig
+
+Configuration for individual routes:
+
+```rust
+// Create a new route
+let route = RouteConfig::new("http://backend:8080")
+    .with_timeout(5000)              // Route-specific timeout
+    .with_retry_count(3)             // Number of retries
+    .with_priority(10)               // Route priority
+    .preserve_host_header(true);     // Preserve original host header
+
+// TCP-specific configuration
+let tcp_route = RouteConfig::new("db.example.com:5432")
+    .as_tcp(true)                    // Mark as TCP route
+    .with_tcp_listen_port(5432)      // Custom listen port
+    .with_db_type("postgresql");     // Database type
+    
+// UDP-specific configuration
+let udp_route = RouteConfig::new("metrics.internal:8125")
+    .as_udp(true)                    // Mark as UDP route
+    .with_udp_listen_port(8125);     // Custom listen port
 ```
 
 ## Configuration Reference
@@ -362,6 +509,7 @@ net.core.wmem_max = 26214400  # Increase UDP send buffer
 - **Edge Proxy**: Use as an edge proxy for all protocols
 - **IoT Gateway**: Handle diverse protocols used by IoT devices
 - **Game Server Infrastructure**: Proxy both TCP and UDP game traffic
+- **Embedded Proxy**: Integrate proxy functionality directly into your Rust applications
 
 ## Contributing
 
