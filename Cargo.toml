@@ -1,5 +1,5 @@
 [package]
-name = "harbr-router"
+name = "harbr_router"
 version = "0.1.2"
 edition = "2021"
 
