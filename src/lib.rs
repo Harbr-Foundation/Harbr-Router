@@ -1,261 +1,535 @@
-// src/lib.rs
+// src/lib.rs - Main library entry point for embeddable router
 use anyhow::Result;
 use std::sync::Arc;
-use tokio::sync::{broadcast, mpsc, RwLock};
+use tokio::sync::{broadcast, mpsc};
 
-pub mod client;
 pub mod config;
+pub mod plugin;
+pub mod server;
+pub mod router;
+pub mod middleware;
 pub mod metrics;
-pub mod http_proxy;
-pub mod tcp_proxy;
-pub mod udp_proxy;
-pub mod dynamic_config;
-pub mod config_api;
+pub mod error;
+pub mod builtin_plugins;
+pub mod management_api;
+pub mod health;
+pub mod logging;
 
-/// The main Router struct that manages all proxy services
+// Re-export main types for easy usage
+pub use config::RouterConfig;
+pub use plugin::{Plugin, PluginConfig, PluginInfo, PluginCapabilities, PluginEvent, RouterEvent};
+pub use server::ProxyServer;
+pub use error::{RouterError, Result as RouterResult};
+
+/// Main Router struct - embeddable and programmable
 pub struct Router {
-    config_manager: Arc<DynamicConfigManager>,
-    shutdown_tx: Option<mpsc::Sender<()>>,
+    server: Option<Arc<ProxyServer>>,
+    config: Arc<tokio::sync::RwLock<RouterConfig>>,
+    shutdown_sender: Option<broadcast::Sender<()>>,
+    event_sender: Option<mpsc::UnboundedSender<RouterEvent>>,
+    event_receiver: Option<mpsc::UnboundedReceiver<RouterEvent>>,
 }
 
 impl Router {
-    /// Create a new Router with the provided configuration manager
-    pub fn new_with_manager(config_manager: Arc<DynamicConfigManager>) -> Self {
-        Router {
-            config_manager,
-            shutdown_tx: None,
-        }
+    /// Create a new router with configuration
+    pub async fn new(config: RouterConfig) -> Result<Self> {
+        let server = Arc::new(ProxyServer::new(config.clone()).await?);
+        let (shutdown_tx, _shutdown_rx) = broadcast::channel(1);
+        let (event_tx, event_rx) = mpsc::unbounded_channel();
+        
+        Ok(Self {
+            server: Some(server),
+            config: Arc::new(tokio::sync::RwLock::new(config)),
+            shutdown_sender: Some(shutdown_tx),
+            event_sender: Some(event_tx),
+            event_receiver: Some(event_rx),
+        })
     }
-
-    /// Create a new Router with the provided configuration
-    pub fn new(config: config::ProxyConfig) -> Self {
-        let config_manager = Arc::new(DynamicConfigManager::new(config));
-        Self::new_with_manager(config_manager)
+    
+    /// Create a router from JSON configuration file
+    pub async fn from_config_file<P: AsRef<std::path::Path>>(path: P) -> Result<Self> {
+        let config = RouterConfig::load_from_file(path).await?;
+        Self::new(config).await
     }
-
-    /// Create a new Router by loading configuration from a file
-    pub async fn from_file(config_path: &str) -> Result<Self> {
-        let config_manager = DynamicConfigManager::from_file(config_path).await?;
-        Ok(Router::new_with_manager(Arc::new(config_manager)))
+    
+    /// Create a router with default configuration
+    pub async fn with_defaults() -> Result<Self> {
+        let config = RouterConfig::default();
+        Self::new(config).await
     }
-
-    /// Get the configuration manager
-    pub fn config_manager(&self) -> Arc<DynamicConfigManager> {
-        self.config_manager.clone()
-    }
-
-    /// Start the router service with all enabled proxies
+    
+    /// Start the router server
     pub async fn start(&mut self) -> Result<()> {
-        // Initialize metrics
-        metrics::init_metrics()?;
-
-        // Create a shutdown channel
-        let (shutdown_tx, mut shutdown_rx) = mpsc::channel::<()>(1);
-        self.shutdown_tx = Some(shutdown_tx);
-
-        // Set up config change listener
-        let mut config_rx = self.config_manager.subscribe();
-        let config_manager = self.config_manager.clone();
-
-        // Initial configuration
-        let initial_config = self.config_manager.get_config().read().await.clone();
-
-        // Start the HTTP proxy server
-        let http_config = self.config_manager.get_config().clone();
-        let http_handle = tokio::spawn(async move {
-            if let Err(e) = http_proxy::run_server(http_config).await {
-                tracing::error!("HTTP Server error: {}", e);
-            }
-        });
-
-        // Check for database routes that should be handled as TCP
-        let has_db_routes = initial_config.routes.iter().any(|(_, route)| {
-            config::is_likely_database(route)
-        });
-
-        // Check for UDP routes
-        let has_udp_routes = initial_config.routes.iter().any(|(_, route)| {
-            route.is_udp.unwrap_or(false)
-        });
-
-        // Start TCP proxy if enabled or if database routes are detected
-        let tcp_handle = if initial_config.tcp_proxy.enabled || has_db_routes {
-            tracing::info!("TCP proxy support enabled");
-            let tcp_config = self.config_manager.get_config().clone();
-            
-            let handle = tokio::spawn(async move {
-                let tcp_proxy = tcp_proxy::TcpProxyServer::new(tcp_config).await;
-                if let Err(e) = tcp_proxy.run(&initial_config.tcp_proxy.listen_addr).await {
-                    tracing::error!("TCP proxy server error: {}", e);
-                }
-            });
-            Some(handle)
+        if let Some(server) = &self.server {
+            server.start().await?;
         } else {
-            None
-        };
+            return Err(anyhow::anyhow!("Server not initialized"));
+        }
+        Ok(())
+    }
+    
+    /// Stop the router server
+    pub async fn stop(&mut self) -> Result<()> {
+        if let Some(sender) = &self.shutdown_sender {
+            let _ = sender.send(());
+        }
         
-        // Start UDP proxy if enabled or if UDP routes are detected
-        let udp_handle = if initial_config.tcp_proxy.udp_enabled || has_udp_routes {
-            tracing::info!("UDP proxy support enabled");
-            let udp_config = self.config_manager.get_config().clone();
-            
-            // Use the same address as TCP proxy by default
-            let udp_listen_addr = initial_config.tcp_proxy.udp_listen_addr.clone();
-            
-            let handle = tokio::spawn(async move {
-                let udp_proxy = udp_proxy::UdpProxyServer::new(udp_config);
-                if let Err(e) = udp_proxy.run(&udp_listen_addr).await {
-                    tracing::error!("UDP proxy server error: {}", e);
-                }
-            });
-            Some(handle)
-        } else {
-            None
-        };
-
-        // Set up the config API
-        let api_handle = {
-            let api_routes = config_api::config_api_routes(self.config_manager.clone());
-            
-            // Create a separate server for the API on a different port
-            let api_port = 8082; // Could be configurable
-            let api_addr = format!("0.0.0.0:{}", api_port);
-            
-            tracing::info!("Starting configuration API server on {}", api_addr);
-            
-            tokio::spawn(async move {
-                warp::serve(api_routes)
-                    .run(api_addr.parse::<std::net::SocketAddr>().unwrap())
-                    .await;
-            })
-        };
-
-        // Listen for configuration changes and handle them
-        let config_change_handle = tokio::spawn(async move {
-            tracing::info!("Starting configuration change listener");
-            
-            loop {
-                tokio::select! {
-                    // Handle shutdown signal
-                    _ = shutdown_rx.recv() => {
-                        tracing::info!("Received shutdown signal, stopping config listener");
-                        break;
-                    }
-                    
-                    // Handle configuration changes
-                    result = config_rx.recv() => {
-                        match result {
-                            Ok(event) => {
-                                tracing::info!("Received configuration change event: {:?}", event);
-                                
-                                match event {
-                                    ConfigEvent::RouteAdded(name, config) => {
-                                        tracing::info!("Route added: {}", name);
-                                        // No need to restart services, they'll pick up the change
-                                    }
-                                    ConfigEvent::RouteUpdated(name, config) => {
-                                        tracing::info!("Route updated: {}", name);
-                                        // No need to restart services, they'll pick up the change
-                                    }
-                                    ConfigEvent::RouteRemoved(name) => {
-                                        tracing::info!("Route removed: {}", name);
-                                        // No need to restart services, they'll pick up the change
-                                    }
-                                    ConfigEvent::TcpConfigUpdated(tcp_config) => {
-                                        tracing::warn!("TCP configuration updated - some changes may require restart");
-                                        // Here we could potentially restart TCP services if needed
-                                    }
-                                    ConfigEvent::GlobalSettingsUpdated { .. } => {
-                                        tracing::warn!("Global settings updated - some changes may require restart");
-                                        // Here we could potentially restart services if needed
-                                    }
-                                    ConfigEvent::FullUpdate(_) => {
-                                        tracing::warn!("Full configuration replaced - some changes may require restart");
-                                        // Here we could potentially restart all services if needed
-                                    }
-                                }
-                            }
-                            Err(e) => {
-                                if matches!(e, tokio::sync::broadcast::error::RecvError::Lagged(_)) {
-                                    tracing::warn!("Config listener lagged and missed messages");
-                                } else {
-                                    tracing::error!("Error receiving config change: {}", e);
-                                    break;
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        });
-
-        // TODO: Add this
-        // // Optional: start file watcher if config was loaded from file
-        // if let Some(path) = config_manager.file_path() {
-        //     if let Err(e) = config_manager.start_file_watcher(30).await {
-        //         tracing::error!("Failed to start file watcher: {}", e);
-        //     }
-        // }
-
-        // Wait for Ctrl+C or other shutdown signal
-        tokio::signal::ctrl_c().await?;
-        tracing::info!("Received shutdown signal");
-        
-        // Attempt graceful shutdown
-        if let Some(tx) = &self.shutdown_tx {
-            let _ = tx.send(()).await;
+        if let Some(server) = &self.server {
+            server.stop().await?;
         }
         
         Ok(())
     }
-
-    /// Manually trigger a configuration reload from file
-    pub async fn reload_config(&self) -> Result<()> {
-        self.config_manager.reload_from_file().await
+    
+    /// Get the plugin manager for programmatic plugin management
+    pub fn plugin_manager(&self) -> Option<Arc<plugin::manager::PluginManager>> {
+        self.server.as_ref().map(|s| s.plugin_manager())
     }
     
-    /// Get the current configuration
-    pub async fn get_config(&self) -> config::ProxyConfig {
-        self.config_manager.get_config().read().await.clone()
+    /// Load a plugin from a file
+    pub async fn load_plugin<P: AsRef<std::path::Path>>(
+        &self,
+        path: P,
+        config: Option<PluginConfig>,
+    ) -> Result<String> {
+        if let Some(pm) = self.plugin_manager() {
+            pm.load_plugin_from_path(path, config).await
+        } else {
+            Err(anyhow::anyhow!("Plugin manager not available"))
+        }
     }
     
-    /// Update a specific route
-    pub async fn update_route(&self, route_name: &str, route_config: config::RouteConfig) -> Result<()> {
-        self.config_manager.update_route(route_name, route_config).await
+    /// Unload a plugin
+    pub async fn unload_plugin(&self, name: &str) -> Result<()> {
+        if let Some(pm) = self.plugin_manager() {
+            pm.unload_plugin(name).await
+        } else {
+            Err(anyhow::anyhow!("Plugin manager not available"))
+        }
     }
     
-    /// Add a new route
-    pub async fn add_route(&self, route_name: &str, route_config: config::RouteConfig) -> Result<()> {
-        self.config_manager.add_route(route_name, route_config).await
+    /// Register a plugin programmatically (for embedded usage)
+    pub async fn register_plugin(
+        &self,
+        name: String,
+        plugin: Box<dyn Plugin>,
+        config: PluginConfig,
+    ) -> Result<()> {
+        if let Some(pm) = self.plugin_manager() {
+            pm.registry().register_plugin(name.clone(), plugin, config).await?;
+            pm.registry().start_plugin(&name).await?;
+            Ok(())
+        } else {
+            Err(anyhow::anyhow!("Plugin manager not available"))
+        }
+    }
+    
+    /// Add a route programmatically
+    pub async fn add_route(&self, domain: String, proxy_instance: String) -> Result<()> {
+        let mut config = self.config.write().await;
+        
+        // Find the proxy instance
+        if !config.proxies.iter().any(|p| p.name == proxy_instance) {
+            return Err(anyhow::anyhow!("Proxy instance '{}' not found", proxy_instance));
+        }
+        
+        // Add domain mapping
+        config.domains.insert(domain.clone(), config::DomainConfig {
+            proxy_instance,
+            backend_service: None,
+            ssl_config: None,
+            cors_config: None,
+            cache_config: None,
+            custom_headers: std::collections::HashMap::new(),
+            rewrite_rules: vec![],
+            access_control: None,
+        });
+        
+        // Update the proxy instance to include this domain
+        for proxy in &mut config.proxies {
+            if proxy.name == proxy_instance {
+                if !proxy.domains.contains(&domain) {
+                    proxy.domains.push(domain);
+                }
+                break;
+            }
+        }
+        
+        // Notify server of configuration change
+        if let Some(server) = &self.server {
+            server.reload_config(config.clone()).await?;
+        }
+        
+        Ok(())
     }
     
     /// Remove a route
-    pub async fn remove_route(&self, route_name: &str) -> Result<()> {
-        self.config_manager.remove_route(route_name).await
+    pub async fn remove_route(&self, domain: &str) -> Result<()> {
+        let mut config = self.config.write().await;
+        
+        // Remove from domain mappings
+        if let Some(domain_config) = config.domains.remove(domain) {
+            // Remove from proxy instance
+            for proxy in &mut config.proxies {
+                if proxy.name == domain_config.proxy_instance {
+                    proxy.domains.retain(|d| d != domain);
+                    break;
+                }
+            }
+            
+            // Notify server of configuration change
+            if let Some(server) = &self.server {
+                server.reload_config(config.clone()).await?;
+            }
+        }
+        
+        Ok(())
     }
     
-    /// Update TCP proxy configuration
-    pub async fn update_tcp_config(&self, tcp_config: config::TcpProxyConfig) -> Result<()> {
-        self.config_manager.update_tcp_config(tcp_config).await
+    /// Update configuration
+    pub async fn update_config(&self, new_config: RouterConfig) -> Result<()> {
+        {
+            let mut config = self.config.write().await;
+            *config = new_config.clone();
+        }
+        
+        if let Some(server) = &self.server {
+            server.reload_config(new_config).await?;
+        }
+        
+        Ok(())
     }
     
-    /// Update global settings
-    pub async fn update_global_settings(
+    /// Get current configuration
+    pub async fn get_config(&self) -> RouterConfig {
+        self.config.read().await.clone()
+    }
+    
+    /// Get plugin information
+    pub async fn get_plugin_info(&self, name: &str) -> Option<PluginInfo> {
+        self.plugin_manager()?.get_plugin_info(name).await
+    }
+    
+    /// List all plugins
+    pub fn list_plugins(&self) -> Vec<String> {
+        self.plugin_manager().map(|pm| pm.list_plugins()).unwrap_or_default()
+    }
+    
+    /// Get plugin health
+    pub async fn get_plugin_health(&self, name: &str) -> Option<plugin::PluginHealth> {
+        self.plugin_manager()?.get_plugin_health(name).await
+    }
+    
+    /// Get plugin metrics
+    pub async fn get_plugin_metrics(&self, name: &str) -> Option<plugin::PluginMetrics> {
+        self.plugin_manager()?.get_plugin_metrics(name).await
+    }
+    
+    /// Get all metrics
+    pub async fn get_all_metrics(&self) -> std::collections::HashMap<String, plugin::PluginMetrics> {
+        self.plugin_manager().map(|pm| 
+            futures::executor::block_on(pm.get_all_metrics())
+        ).unwrap_or_default()
+    }
+    
+    /// Send event to plugin
+    pub async fn send_event_to_plugin(&self, plugin_name: &str, event: PluginEvent) -> Result<()> {
+        if let Some(pm) = self.plugin_manager() {
+            pm.send_event_to_plugin(plugin_name, event).await
+        } else {
+            Err(anyhow::anyhow!("Plugin manager not available"))
+        }
+    }
+    
+    /// Broadcast event to all plugins
+    pub async fn broadcast_event(&self, event: PluginEvent) {
+        if let Some(pm) = self.plugin_manager() {
+            pm.broadcast_event(event).await;
+        }
+    }
+    
+    /// Execute plugin command
+    pub async fn execute_plugin_command(
         &self,
-        listen_addr: Option<String>,
-        global_timeout_ms: Option<u64>,
-        max_connections: Option<usize>,
-    ) -> Result<()> {
-        self.config_manager.update_global_settings(listen_addr, global_timeout_ms, max_connections).await
+        plugin_name: &str,
+        command: &str,
+        args: serde_json::Value,
+    ) -> Result<serde_json::Value> {
+        if let Some(pm) = self.plugin_manager() {
+            pm.execute_plugin_command(plugin_name, command, args).await
+        } else {
+            Err(anyhow::anyhow!("Plugin manager not available"))
+        }
     }
     
-    /// Replace the entire configuration
-    pub async fn replace_config(&self, new_config: config::ProxyConfig) -> Result<()> {
-        self.config_manager.replace_config(new_config).await
+    /// Enable management API
+    pub async fn enable_management_api(&self, port: u16) -> Result<()> {
+        if let Some(server) = &self.server {
+            server.enable_management_api(port).await
+        } else {
+            Err(anyhow::anyhow!("Server not available"))
+        }
+    }
+    
+    /// Get event receiver for monitoring router events
+    pub fn take_event_receiver(&mut self) -> Option<mpsc::UnboundedReceiver<RouterEvent>> {
+        self.event_receiver.take()
+    }
+    
+    /// Get event sender for sending custom events
+    pub fn event_sender(&self) -> Option<mpsc::UnboundedSender<RouterEvent>> {
+        self.event_sender.clone()
+    }
+    
+    /// Check if router is running
+    pub async fn is_running(&self) -> bool {
+        if let Some(server) = &self.server {
+            server.is_running().await
+        } else {
+            false
+        }
+    }
+    
+    /// Get server statistics
+    pub async fn get_statistics(&self) -> Option<server::ServerStatistics> {
+        if let Some(server) = &self.server {
+            Some(server.get_statistics().await)
+        } else {
+            None
+        }
+    }
+    
+    /// Graceful shutdown with timeout
+    pub async fn shutdown_with_timeout(&mut self, timeout: std::time::Duration) -> Result<()> {
+        let shutdown_future = self.stop();
+        
+        match tokio::time::timeout(timeout, shutdown_future).await {
+            Ok(result) => result,
+            Err(_) => {
+                tracing::warn!("Graceful shutdown timed out, forcing shutdown");
+                // Force shutdown if needed
+                Ok(())
+            }
+        }
+    }
+    
+    /// Wait for router to finish (blocking)
+    pub async fn wait(&self) -> Result<()> {
+        if let Some(server) = &self.server {
+            server.wait().await
+        } else {
+            Ok(())
+        }
     }
 }
 
-// Re-export types for easier usage
-pub use config::{ProxyConfig, RouteConfig, TcpProxyConfig};
-pub use dynamic_config::{DynamicConfigManager, ConfigEvent};
-pub use client::ConfigClient;
+impl Drop for Router {
+    fn drop(&mut self) {
+        // Attempt graceful shutdown on drop
+        if let Some(sender) = &self.shutdown_sender {
+            let _ = sender.send(());
+        }
+    }
+}
+
+/// Builder pattern for Router configuration
+pub struct RouterBuilder {
+    config: RouterConfig,
+}
+
+impl RouterBuilder {
+    pub fn new() -> Self {
+        Self {
+            config: RouterConfig::default(),
+        }
+    }
+    
+    /// Set listen addresses
+    pub fn listen_on(mut self, addresses: Vec<String>) -> Self {
+        self.config.server.listen_addresses = addresses;
+        self
+    }
+    
+    /// Add plugin directory
+    pub fn plugin_directory<S: Into<String>>(mut self, directory: S) -> Self {
+        self.config.plugins.plugin_directories.push(directory.into());
+        self
+    }
+    
+    /// Enable auto-reload
+    pub fn auto_reload(mut self, enabled: bool) -> Self {
+        self.config.plugins.auto_reload = enabled;
+        self
+    }
+    
+    /// Set max connections
+    pub fn max_connections(mut self, max: usize) -> Self {
+        self.config.server.max_connections = max;
+        self
+    }
+    
+    /// Enable metrics
+    pub fn enable_metrics(mut self, port: u16) -> Self {
+        self.config.monitoring.metrics_enabled = true;
+        self.config.monitoring.metrics_port = port;
+        self
+    }
+    
+    /// Enable health checks
+    pub fn enable_health_checks(mut self, port: u16) -> Self {
+        self.config.server.health_check_port = port;
+        self
+    }
+    
+    /// Add proxy instance
+    pub fn add_proxy(mut self, proxy: config::ProxyInstanceConfig) -> Self {
+        self.config.proxies.push(proxy);
+        self
+    }
+    
+    /// Add domain mapping
+    pub fn add_domain(mut self, domain: String, config: config::DomainConfig) -> Self {
+        self.config.domains.insert(domain, config);
+        self
+    }
+    
+    /// Build the router
+    pub async fn build(self) -> Result<Router> {
+        Router::new(self.config).await
+    }
+}
+
+impl Default for RouterBuilder {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Convenience functions for quick setup
+pub async fn create_http_proxy(
+    listen_port: u16,
+    domain: String,
+    backend_url: String,
+) -> Result<Router> {
+    let proxy_config = config::ProxyInstanceConfig {
+        name: "http_proxy".to_string(),
+        plugin_type: "http_proxy".to_string(),
+        enabled: true,
+        priority: 0,
+        ports: vec![listen_port],
+        bind_addresses: vec!["0.0.0.0".to_string()],
+        domains: vec![domain.clone()],
+        plugin_config: serde_json::json!({
+            "backend_url": backend_url,
+            "timeout_ms": 30000,
+            "retry_count": 3
+        }),
+        middleware: vec![],
+        load_balancing: None,
+        health_check: Some(config::HealthCheckConfig {
+            enabled: true,
+            interval_seconds: 30,
+            timeout_seconds: 10,
+            path: Some("/health".to_string()),
+            expected_status: Some(200),
+            custom_check: None,
+        }),
+        circuit_breaker: None,
+        rate_limiting: None,
+        ssl_config: None,
+    };
+    
+    let domain_config = config::DomainConfig {
+        proxy_instance: "http_proxy".to_string(),
+        backend_service: Some(backend_url),
+        ssl_config: None,
+        cors_config: None,
+        cache_config: None,
+        custom_headers: std::collections::HashMap::new(),
+        rewrite_rules: vec![],
+        access_control: None,
+    };
+    
+    RouterBuilder::new()
+        .listen_on(vec![format!("0.0.0.0:{}", listen_port)])
+        .add_proxy(proxy_config)
+        .add_domain(domain, domain_config)
+        .build()
+        .await
+}
+
+pub async fn create_tcp_proxy(
+    listen_port: u16,
+    backend_address: String,
+) -> Result<Router> {
+    let proxy_config = config::ProxyInstanceConfig {
+        name: "tcp_proxy".to_string(),
+        plugin_type: "tcp_proxy".to_string(),
+        enabled: true,
+        priority: 0,
+        ports: vec![listen_port],
+        bind_addresses: vec!["0.0.0.0".to_string()],
+        domains: vec![],
+        plugin_config: serde_json::json!({
+            "backend_address": backend_address,
+            "connection_pooling": true,
+            "max_idle_time_secs": 60
+        }),
+        middleware: vec![],
+        load_balancing: None,
+        health_check: Some(config::HealthCheckConfig {
+            enabled: true,
+            interval_seconds: 60,
+            timeout_seconds: 5,
+            path: None,
+            expected_status: None,
+            custom_check: Some(serde_json::json!({
+                "type": "tcp_connect"
+            })),
+        }),
+        circuit_breaker: None,
+        rate_limiting: None,
+        ssl_config: None,
+    };
+    
+    RouterBuilder::new()
+        .listen_on(vec![format!("0.0.0.0:{}", listen_port)])
+        .add_proxy(proxy_config)
+        .build()
+        .await
+}
+
+/// Async-friendly router handle for embedding in other async applications
+pub struct RouterHandle {
+    router: Arc<tokio::sync::Mutex<Router>>,
+    handle: tokio::task::JoinHandle<Result<()>>,
+}
+
+impl RouterHandle {
+    pub async fn spawn(mut router: Router) -> Result<Self> {
+        let router_arc = Arc::new(tokio::sync::Mutex::new(router));
+        let router_clone = router_arc.clone();
+        
+        let handle = tokio::spawn(async move {
+            let mut router = router_clone.lock().await;
+            router.start().await?;
+            router.wait().await
+        });
+        
+        Ok(Self {
+            router: router_arc,
+            handle,
+        })
+    }
+    
+    pub async fn stop(&self) -> Result<()> {
+        let mut router = self.router.lock().await;
+        router.stop().await?;
+        self.handle.abort();
+        Ok(())
+    }
+    
+    pub async fn router(&self) -> tokio::sync::MutexGuard<Router> {
+        self.router.lock().await
+    }
+}
