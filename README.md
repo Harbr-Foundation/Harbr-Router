@@ -258,8 +258,7 @@ Licensed under the Apache License 2.0. See [LICENSE](LICENSE) for details.
 ## 🆘 Getting Help
 
 - **Issues**: [GitHub Issues](https://github.com/Harbr-Foundation/Harbr-Router/issues)
-- **Discussions**: [GitHub Discussions](https://github.com/Harbr-Foundation/Harbr-Router/discussions)  
-- **Security**: Email security@harbr-router.dev
+- **Discussions**: [GitHub Discussions](https://github.com/Harbr-Foundation/Harbr-Router/discussions)
 
 ---
 
