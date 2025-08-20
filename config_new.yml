@@ -1,0 +1,122 @@
+# Modern Harbr Router Configuration
+global:
+  metrics:
+    enabled: true
+    listen_addr: "127.0.0.1:9090"
+    path: "/metrics"
+    interval_secs: 30
+  
+  health_check:
+    enabled: true
+    listen_addr: "127.0.0.1:8080"
+    path: "/health"
+  
+  performance:
+    worker_threads: 0
+    cpu_affinity: true
+    buffer_pool:
+      initial_size: 1000
+      max_size: 10000
+      buffer_size: 8192
+    connection_pool:
+      max_connections_per_upstream: 100
+      idle_timeout_secs: 300
+      keepalive_timeout_secs: 60
+  
+  logging:
+    level: "info"
+    format: "json"
+
+proxy_instances:
+  # HTTP Proxy for web traffic
+  - name: "web_proxy"
+    proxy_type: "http"
+    listen_addr: "0.0.0.0:8081"
+    upstreams:
+      - name: "web_server_1"
+        address: "127.0.0.1:8080"
+        weight: 2
+        priority: 100
+        timeout_ms: 5000
+        retry:
+          max_retries: 3
+          backoff_ms: 100
+          max_backoff_ms: 5000
+        health_check:
+          interval_secs: 10
+          timeout_secs: 3
+          failure_threshold: 3
+          success_threshold: 2
+          type: "http"
+          path: "/health"
+          expected_status: [200]
+      - name: "web_server_2"
+        address: "127.0.0.1:8090"
+        weight: 1
+        priority: 90
+        timeout_ms: 5000
+        retry:
+          max_retries: 2
+          backoff_ms: 200
+          max_backoff_ms: 3000
+    config:
+      http:
+        max_request_size: 10485760
+        request_timeout_secs: 30
+        keep_alive_timeout_secs: 60
+        connection_pool_size: 100
+        add_headers:
+          "X-Forwarded-Proto": "https"
+          "X-Real-IP": "client"
+
+  # TCP Proxy for database connections
+  - name: "db_proxy"
+    proxy_type: "tcp"
+    listen_addr: "0.0.0.0:5432"
+    upstreams:
+      - name: "postgres_primary"
+        address: "127.0.0.1:5433"
+        weight: 3
+        priority: 100
+        timeout_ms: 10000
+        health_check:
+          interval_secs: 15
+          timeout_secs: 5
+          failure_threshold: 3
+          success_threshold: 2
+          type: "tcp"
+      - name: "postgres_replica"
+        address: "127.0.0.1:5434"
+        weight: 1
+        priority: 50
+        timeout_ms: 10000
+    config:
+      tcp:
+        idle_timeout_secs: 300
+        connection_pool_size: 50
+        nodelay: true
+        keepalive:
+          enabled: true
+          idle_secs: 600
+          interval_secs: 60
+          probes: 3
+
+  # UDP Proxy for DNS
+  - name: "dns_proxy"
+    proxy_type: "udp"
+    listen_addr: "0.0.0.0:5353"
+    upstreams:
+      - name: "dns_server_1"
+        address: "8.8.8.8:53"
+        weight: 2
+        priority: 100
+        timeout_ms: 1000
+      - name: "dns_server_2"
+        address: "8.8.4.4:53"
+        weight: 1
+        priority: 90
+        timeout_ms: 2000
+    config:
+      udp:
+        buffer_size: 1024
+        session_timeout_secs: 60

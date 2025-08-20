@@ -1,10 +1,36 @@
-// src/lib.rs
-pub mod metrics;
-pub mod proxies;
-pub mod new_config;
-pub mod modern_router;
+//! # Harbr Router
+//!
+//! A high-performance, modular reverse proxy built with Rust.
+//! 
+//! ## Architecture
+//! 
+//! This crate follows Clean Architecture principles with clear separation of concerns:
+//! 
+//! - **Domain**: Core business logic and entities (`config`, `routing`)
+//! - **Application**: Use cases and orchestration (`proxy`, `router`) 
+//! - **Infrastructure**: External concerns (`metrics`, `server`)
+//! - **Performance**: Optimizations and resource management (`buffers`, `affinity`)
 
-// Re-export the main types for easy usage
-pub use proxies::{ProxyManager, ProxyInstance, HostConfig, Proxy};
-pub use new_config::NewProxyConfig;
-pub use modern_router::ModernRouter;
+pub mod config;
+pub mod routing;
+pub mod proxy;
+pub mod router;
+pub mod metrics;
+pub mod server;
+pub mod buffers;
+pub mod affinity;
+pub mod error;
+
+// Re-export main public types
+pub use config::Config;
+pub use router::Router;
+pub use error::{Error, Result};
+
+/// Current version of the Harbr Router
+pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+
+/// Maximum supported proxy instances per router
+pub const MAX_PROXY_INSTANCES: usize = 1000;
+
+/// Default configuration file name
+pub const DEFAULT_CONFIG_FILE: &str = "config.yml";
