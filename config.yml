@@ -1,74 +1,140 @@
-# config.yml
-listen_addr: "0.0.0.0:8081"
-global_timeout_ms: 5000
-max_connections: 10000
+# New flexible proxy configuration format
+proxy_instances:
+  # HTTP Proxy instances
+  - name: "main_http"
+    proxy_type: "http"
+    listen_addr: "0.0.0.0:8081"
+    config:
+      timeout_ms: 30000
+      connection_pooling: true
+    hosts:
+      - name: "/api/critical"
+        upstream: "http://critical-backend:8080"
+        priority: 100
+        timeout_ms: 1000
+        retry_count: 3
+        weight: 1
+      - name: "/api"
+        upstream: "http://backend-api:8080"
+        priority: 50
+        timeout_ms: 3000
+        retry_count: 2
+        weight: 1
+      - name: "/"
+        upstream: "http://default-backend:8080"
+        priority: 0
+        timeout_ms: 5000
+        retry_count: 1
+        weight: 1
+        
+  # Secondary HTTP proxy on different port
+  - name: "admin_http"
+    proxy_type: "http"
+    listen_addr: "0.0.0.0:8082"
+    config:
+      timeout_ms: 10000
+      connection_pooling: false
+    hosts:
+      - name: "/admin"
+        upstream: "http://admin-backend:9000"
+        priority: 100
+        timeout_ms: 5000
+        retry_count: 1
+        preserve_host_header: true
 
-# TCP/UDP Proxy Configuration
-tcp_proxy:
-  enabled: true
-  listen_addr: "0.0.0.0:9090"
-  connection_pooling: true
-  max_idle_time_secs: 60
-  udp_enabled: true
-  udp_listen_addr: "0.0.0.0:9090"  # Same port as TCP
+  # TCP Proxy instances  
+  - name: "mysql_proxy"
+    proxy_type: "tcp"
+    listen_addr: "0.0.0.0:3306"
+    config:
+      max_idle_time_secs: 120
+      connection_pooling: true
+    hosts:
+      - name: "primary"
+        upstream: "mysql-primary:3306"
+        priority: 100
+        weight: 3
+        health_check:
+          enabled: true
+          interval_ms: 5000
+          timeout_ms: 1000
+      - name: "replica1"
+        upstream: "mysql-replica1:3306"
+        priority: 50
+        weight: 2
+        health_check:
+          enabled: true
+          interval_ms: 10000
+          timeout_ms: 1000
+      - name: "replica2"
+        upstream: "mysql-replica2:3306"
+        priority: 50
+        weight: 1
+        health_check:
+          enabled: true
+          interval_ms: 10000
+          timeout_ms: 1000
 
-routes:
-  # HTTP Routes
-  "/api/critical":
-    upstream: "http://critical-backend:8080"
-    priority: 100
-    timeout_ms: 1000
-    retry_count: 3
+  - name: "postgres_proxy"
+    proxy_type: "tcp"
+    listen_addr: "0.0.0.0:5432"
+    config:
+      max_idle_time_secs: 300
+      connection_pooling: true
+    hosts:
+      - name: "analytics_db"
+        upstream: "analytics-db:5432"
+        priority: 100
+        timeout_ms: 15000
+        retry_count: 2
+
+  # UDP Proxy instances
+  - name: "dns_proxy"
+    proxy_type: "udp"
+    listen_addr: "0.0.0.0:5959"
+    config:
+      buffer_size: 512
+    hosts:
+      - name: "primary_dns"
+        upstream: "dns-primary:53"
+        priority: 100
+        timeout_ms: 1000
+        weight: 2
+      - name: "secondary_dns"
+        upstream: "dns-secondary:53"
+        priority: 50
+        timeout_ms: 2000
+        weight: 1
+
+  - name: "game_server_proxy"
+    proxy_type: "udp"
+    listen_addr: "0.0.0.0:27015"
+    config:
+      buffer_size: 1400
+    hosts:
+      - name: "game_server1"
+        upstream: "game-server1:27015"
+        priority: 100
+        timeout_ms: 100
+        weight: 1
+      - name: "game_server2"
+        upstream: "game-server2:27015"
+        priority: 100
+        timeout_ms: 100
+        weight: 1
+
+# Global configuration
+global:
+  metrics:
+    enabled: true
+    listen_addr: "0.0.0.0:9090"
+    path: "/metrics"
   
-  "/api":
-    upstream: "http://backend-api:8080"
-    priority: 50
-    timeout_ms: 3000
-    retry_count: 2
+  health_check:
+    enabled: true
+    listen_addr: "0.0.0.0:8080"
+    path: "/health"
   
-  # Default HTTP route
-  "/":
-    upstream: "http://default-backend:8080"
-    priority: 0
-    timeout_ms: 5000
-    retry_count: 1
-  
-  # Database Routes (automatically detected as TCP)
-  "mysql-primary":
-    upstream: "mysql://db-primary:3306"
-    is_tcp: true
-    db_type: "mysql"
-    timeout_ms: 10000
-    retry_count: 3
-  
-  "postgres-analytics":
-    upstream: "postgresql://analytics-db:5432"
-    is_tcp: true
-    db_type: "postgresql"
-    timeout_ms: 15000
-    retry_count: 2
-    tcp_listen_port: 5433  # Custom listening port
-  
-  # Generic TCP proxy (non-database)
-  "custom-tcp":
-    upstream: "tcp-service:9000"
-    is_tcp: true
-    timeout_ms: 5000
-    retry_count: 1
-    tcp_listen_port: 9001
-  
-  # UDP routes
-  "dns-server":
-    upstream: "dns-service:53"
-    is_udp: true
-    timeout_ms: 1000
-    
-  "syslog-collector":
-    upstream: "logging-service:514"
-    is_udp: true
-    timeout_ms: 2000
-    
-  "game-server":
-    upstream: "game-service:27015"
-    is_udp: true
-    timeout_ms: 5000
+  logging:
+    level: "info"
+    format: "json"

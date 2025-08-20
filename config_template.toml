@@ -1,0 +1,173 @@
+# New flexible proxy configuration format in TOML
+
+[global]
+
+[global.metrics]
+enabled = true
+listen_addr = "0.0.0.0:9090"
+path = "/metrics"
+
+[global.health_check]
+enabled = true
+listen_addr = "0.0.0.0:8080"
+path = "/health"
+
+[global.logging]
+level = "info"
+format = "json"
+
+# HTTP Proxy instances
+[[proxy_instances]]
+name = "main_http"
+proxy_type = "http"
+listen_addr = "0.0.0.0:8081"
+
+[proxy_instances.config]
+timeout_ms = 30000
+connection_pooling = true
+
+[[proxy_instances.hosts]]
+name = "/api/critical"
+upstream = "http://critical-backend:8080"
+priority = 100
+timeout_ms = 1000
+retry_count = 3
+weight = 1
+
+[[proxy_instances.hosts]]
+name = "/api"
+upstream = "http://backend-api:8080"
+priority = 50
+timeout_ms = 3000
+retry_count = 2
+weight = 1
+
+[[proxy_instances.hosts]]
+name = "/"
+upstream = "http://default-backend:8080"
+priority = 0
+timeout_ms = 5000
+retry_count = 1
+weight = 1
+
+# Secondary HTTP proxy on different port
+[[proxy_instances]]
+name = "admin_http"
+proxy_type = "http"
+listen_addr = "0.0.0.0:8082"
+
+[proxy_instances.config]
+timeout_ms = 10000
+connection_pooling = false
+
+[[proxy_instances.hosts]]
+name = "/admin"
+upstream = "http://admin-backend:9000"
+priority = 100
+timeout_ms = 5000
+retry_count = 1
+preserve_host_header = true
+
+# TCP Proxy instances  
+[[proxy_instances]]
+name = "mysql_proxy"
+proxy_type = "tcp"
+listen_addr = "0.0.0.0:3306"
+
+[proxy_instances.config]
+max_idle_time_secs = 120
+connection_pooling = true
+
+[[proxy_instances.hosts]]
+name = "primary"
+upstream = "mysql-primary:3306"
+priority = 100
+weight = 3
+
+[proxy_instances.hosts.health_check]
+enabled = true
+interval_ms = 5000
+timeout_ms = 1000
+
+[[proxy_instances.hosts]]
+name = "replica1"
+upstream = "mysql-replica1:3306"
+priority = 50
+weight = 2
+
+[proxy_instances.hosts.health_check]
+enabled = true
+interval_ms = 10000
+timeout_ms = 1000
+
+[[proxy_instances.hosts]]
+name = "replica2"
+upstream = "mysql-replica2:3306"
+priority = 50
+weight = 1
+
+[proxy_instances.hosts.health_check]
+enabled = true
+interval_ms = 10000
+timeout_ms = 1000
+
+[[proxy_instances]]
+name = "postgres_proxy"
+proxy_type = "tcp"
+listen_addr = "0.0.0.0:5432"
+
+[proxy_instances.config]
+max_idle_time_secs = 300
+connection_pooling = true
+
+[[proxy_instances.hosts]]
+name = "analytics_db"
+upstream = "analytics-db:5432"
+priority = 100
+timeout_ms = 15000
+retry_count = 2
+
+# UDP Proxy instances
+[[proxy_instances]]
+name = "dns_proxy"
+proxy_type = "udp"
+listen_addr = "0.0.0.0:5353"
+
+[proxy_instances.config]
+buffer_size = 512
+
+[[proxy_instances.hosts]]
+name = "primary_dns"
+upstream = "dns-primary:53"
+priority = 100
+timeout_ms = 1000
+weight = 2
+
+[[proxy_instances.hosts]]
+name = "secondary_dns"
+upstream = "dns-secondary:53"
+priority = 50
+timeout_ms = 2000
+weight = 1
+
+[[proxy_instances]]
+name = "game_server_proxy"
+proxy_type = "udp"
+listen_addr = "0.0.0.0:27015"
+
+[proxy_instances.config]
+buffer_size = 1400
+
+[[proxy_instances.hosts]]
+name = "game_server1"
+upstream = "game-server1:27015"
+priority = 100
+timeout_ms = 100
+weight = 1
+
+[[proxy_instances.hosts]]
+name = "game_server2"
+upstream = "game-server2:27015"
+priority = 100
+timeout_ms = 100
+weight = 1
