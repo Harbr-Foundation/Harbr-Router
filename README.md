@@ -28,7 +28,7 @@ cargo install harbr-router
 
 2. Create a configuration file `config.yml`:
 ```yaml
-listen_addr: "0.0.0.0:8080"
+listen_addr: "0.0.0.0:8081"
 global_timeout_ms: 5000
 max_connections: 10000
 
@@ -43,29 +43,51 @@ tcp_proxy:
 
 routes:
   # HTTP Routes
+  "/api/critical":
+    upstream: "http://critical-backend:8080"
+    priority: 100
+    timeout_ms: 1000
+    retry_count: 3
+  
   "/api":
     upstream: "http://backend-api:8080"
+    priority: 50
     timeout_ms: 3000
     retry_count: 2
   
   # Default HTTP route
   "/":
     upstream: "http://default-backend:8080"
+    priority: 0
     timeout_ms: 5000
     retry_count: 1
   
-  # Database Route (automatically handled as TCP)
-  "postgres-db":
-    upstream: "postgresql://postgres-db:5432"
+  # Database Routes
+  "mysql-primary":
+    upstream: "mysql://db-primary:3306"
+    is_tcp: true
+    db_type: "mysql"
+    timeout_ms: 10000
+    retry_count: 3
+  
+  "postgres-analytics":
+    upstream: "postgresql://analytics-db:5432"
     is_tcp: true
     db_type: "postgresql"
-    timeout_ms: 10000
+    timeout_ms: 15000
+    retry_count: 2
+    tcp_listen_port: 5433  # Custom listening port
     
-  # UDP Route
-  "dns-service":
-    upstream: "dns-server:53"
+  # UDP Routes
+  "dns-server":
+    upstream: "dns-service:53"
     is_udp: true
     timeout_ms: 1000
+    
+  "syslog-collector":
+    upstream: "logging-service:514"
+    is_udp: true
+    timeout_ms: 2000
 ```
 
 3. Run the proxy:
@@ -88,7 +110,7 @@ Add Harbr-Router to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-harbr_router = "0.1.0"
+harbr_router = "0.2.0"
 ```
 
 ### Example: Creating a Router Programmatically
@@ -670,7 +692,7 @@ Contributions are welcome!
 
 ## License
 
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+This project is licensed under the Apache-2.0 License - see the [LICENSE](LICENSE) file for details.
 
 ## Acknowledgments
 
