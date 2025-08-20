@@ -26,12 +26,39 @@ listen_addr = "0.0.0.0:8081"
 timeout_ms = 30000
 connection_pooling = true
 
+# Path-aware routing examples - longest paths matched first within same priority
+# Example requests and their routing:
+#   /api/critical/status     -> critical-backend (exact match)
+#   /api/critical/health     -> critical-backend (starts with /api/critical)
+#   /api/users              -> backend-api (starts with /api, but not /api/critical)
+#   /api/users/123          -> backend-api (starts with /api)
+#   /api/v1/orders          -> v1-api (starts with /api/v1)
+#   /api/orders             -> backend-api (starts with /api, but not /api/v1)
+#   /health                 -> default-backend (starts with /, catch-all)
+#   /static/css/main.css    -> default-backend (starts with /, catch-all)
+
 [[proxy_instances.hosts]]
 name = "/api/critical"
 upstream = "http://critical-backend:8080"
 priority = 100
 timeout_ms = 1000
 retry_count = 3
+weight = 1
+
+[[proxy_instances.hosts]]
+name = "/api/v1"
+upstream = "http://v1-api:8080"
+priority = 90
+timeout_ms = 2000
+retry_count = 2
+weight = 1
+
+[[proxy_instances.hosts]]
+name = "/api/auth"
+upstream = "http://auth-service:8080"
+priority = 80
+timeout_ms = 5000
+retry_count = 1
 weight = 1
 
 [[proxy_instances.hosts]]
